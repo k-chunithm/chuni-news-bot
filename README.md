@@ -4,7 +4,7 @@
     <!-- python icon -->
     <img src="https://img.shields.io/badge/-Python-F9DC3E.svg?logo=python&style=flat" />
     <!-- code size -->
-    <img src="https://img.shields.io/github/languages/code-size/kei-academic/chuni-news-bot" />
+    <img src="https://img.shields.io/github/languages/code-size/k-chunithm/chuni-news-bot" />
 </p>
 
 チュウニズム（CHUNITHM）の公式X（Twitter）アカウント（@chunithm）の最新ポストを10分ごとに監視し、新しい投稿があった場合に指定したDiscordチャンネルへ自動転送するBotです。
