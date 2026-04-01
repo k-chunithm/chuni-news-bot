@@ -68,41 +68,77 @@ python3 bot.py
 
 ## クラウド（GCP / e2-micro）での24時間365日稼働手順
 
-手元のPCをシャットダウンしてもBotを動かし続けるには、サーバーを利用してバックグラウンドで起動させる必要があります。
+手元のPCをシャットダウンしてもBotを動かし続けるため、Google Cloudのe2-microインスタンスを利用しています。
 
-1. **ファイルのアップロード**
-   必要なファイル（`bot.py`, `cookies.json`, `.env`, `requirements.txt`）をサーバーにアップロードします。
+### 1. 初回セットアップ（Python環境の構築）
+サーバー機にSSH接続後、以下のコマンドで環境を構築します。
+```bash
+sudo apt update
+sudo apt install -y python3-pip python3-venv tmux
+mkdir -p ~/chuni_bot && cd ~/chuni_bot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-2. **Python環境の構築**
+### 2. twikit のエラーパッチ適用（※バージョン2.3.3時点の必須手順）
+Xの仕様変更によるエラーを防ぐため、以下のパッチを当てます。
+```bash
+TARGET_FILE=$(ls -d venv/lib/python3.*/site-packages/twikit/x_client_transaction/transaction.py)
+wget -qO "$TARGET_FILE" https://raw.githubusercontent.com/ryanstoic/twikit/4a62e2895676398e5c2dcce697597abbddb07a2c/twikit/x_client_transaction/transaction.py
+```
+
+### 3. ローカル（Mac）からのSSH接続設定（初回のみ）
+GCPのブラウザターミナルを使わず、ローカルのMacターミナルから直接サーバーを自由に行き来できるようにする（パスワード不要にする）ための初期設定です。
+
+1. GCPのブラウザターミナル（黒い画面）を開きます。
+2. ローカルのMacにて `cat ~/.ssh/id_rsa.pub` などを実行して、ご自身の公開鍵の文字列（`ssh-rsa AAAAB...`）をコピーします。
+3. GCPのターミナル上で以下のコマンドを使用して、サーバーの合鍵リスト（`authorized_keys`）に直接その鍵を書き込んで登録します。
    ```bash
-   sudo apt update
-   sudo apt install -y python3-pip python3-venv tmux
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
+   echo "ssh-rsa AAAAB3Nza......(あなたのMacの公開鍵の文字列)......" >> ~/.ssh/authorized_keys
    ```
 
-3. **twikit のエラーパッチ適用（※バージョン2.3.3時点の必須手順）**
-   Xの仕様変更により `Couldn't get KEY_BYTE indices` エラーが出る場合、以下のパッチを当ててライブラリを修正します。
+### 4. MacからのネイティブSSH接続とファイル転送の手順
+
+#### サーバーへの接続
+上記のセットアップが完了すれば、Macの通常のターミナルから以下のコマンドで一発接続できます。
+```bash
+ssh k_chunithm@8.229.250.63
+```
+
+#### ローカルからサーバーへのファイル転送（更新・上書き）
+コードや `cookies.json` を更新した際は、**Mac側のターミナル（SSH接続していないローカルのタブ）**で以下を実行します。
+```bash
+scp ~/Downloads/chunithm/chuni-news-bot/bot.py k_chunithm@8.229.250.63:~/chuni_bot/
+scp ~/Downloads/chunithm/chuni-news-bot/cookies.json k_chunithm@8.229.250.63:~/chuni_bot/
+```
+
+### 5. アプリケーションの再起動と永続化（tmux）
+ファイルの更新後や、サーバー再起動時には `tmux` を使ってバックグラウンドで起動します。
+
+**【初めて起動するとき】**
+```bash
+cd ~/chuni_bot
+tmux new -s bot
+source venv/bin/activate
+python3 bot.py
+```
+
+**【更新して再起動するとき】**
+1. ターミナルからSSH接続し、現在動いている画面に入る
    ```bash
-   TARGET_FILE=$(ls -d venv/lib/python3.*/site-packages/twikit/x_client_transaction/transaction.py)
-   wget -qO "$TARGET_FILE" https://raw.githubusercontent.com/ryanstoic/twikit/4a62e2895676398e5c2dcce697597abbddb07a2c/twikit/x_client_transaction/transaction.py
+   tmux attach -t bot
    ```
+2. **`Ctrl + C`** を押して現在のプログラムを強制終了させる
+3. **`python3 bot.py`** で再度起動する
 
-4. **仮想画面（tmux）での永続起動**
-   ```bash
-   # tmuxに入る
-   tmux new -s bot
+**【起動したままデタッチ（脱出）する】**
+プログラムが動いている画面で **`Ctrl + B` を押した後に指を離し、`D` を押す** とバックグラウンド稼働状態になります。そのままSSHの画面やMacのターミナルを閉じても問題ありません。
 
-   # venvを再度有効化してプログラムを起動
-   source venv/bin/activate
-   python3 bot.py
-   ```
-
-5. **バックグラウンドに回す（デタッチ）**
-   プログラムが動いているのを確認したら、**`Ctrl+B` を押して指を離し、`D` を押す**とバックグラウンド稼働状態になります。
-   これでSSH画面を閉じてもBotは24時間稼働し続けます。
+---
 
 ## トラブルシューティング
-* **突然動かなくなった場合**
-X（Twitter）の仕様変更によるものか、`cookies.json` に設定している値の有効期限切れ（数ヶ月程度）の可能性が高いです。ブラウザから再度最新のCookieを取得して上書きし、再起動してください。
+* **突然動かなくなった・エラー通知が届いた場合**
+  X（Twitter）の仕様変更によるものか、`cookies.json` に設定している値の有効期限切れ（数ヶ月程度）の可能性が高いです。ブラウザから再度最新のCookieを取得してローカルの `cookies.json` を更新し、上記の `scp` コマンドで転送後、`tmux` に入って再起動してください。
+* **GCPへのSSH接続が Permission Denied になる場合**
+  サーバー側の `~/.ssh/authorized_keys` に、Macの `~/.ssh/id_rsa.pub` の中身が正しく登録されているか確認してください。

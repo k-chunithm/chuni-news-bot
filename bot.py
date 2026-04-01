@@ -131,7 +131,14 @@ async def check_new_tweets():
         print("Discord: 送信完了しました。")
 
     except Exception as e:
-        print(f"Twitterチェック中にエラーが発生しました: {e}")
+        error_msg = f"Twitterチェック中にエラーが発生しました: {e}"
+        print(error_msg)
+        try:
+            channel = discord_client.get_channel(int(TARGET_CHANNEL_ID))
+            if channel:
+                await channel.send(f"⚠️ **Botエラー通知** ⚠️\nTwitterの監視中にエラーが発生しました。\nCookieの期限切れやXの仕様変更の可能性があります。\n```\n{e}\n```")
+        except Exception as inner_e:
+            print(f"エラー通知の送信にも失敗しました: {inner_e}")
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
