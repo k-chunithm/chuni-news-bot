@@ -1,4 +1,5 @@
 discord.py
-twikit
+beautifulsoup4
+httpx
 python-dotenv
 asyncio
