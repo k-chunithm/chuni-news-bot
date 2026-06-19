@@ -3,3 +3,4 @@ texts/
 last_news_url.txt
 venv/
 __pycache__/
+channels.json

@@ -1,16 +1,17 @@
 import os
 import asyncio
+import json
 import discord
 import httpx
 from bs4 import BeautifulSoup
 from discord.ext import tasks
+from discord import app_commands
 from dotenv import load_dotenv
 
 # 環境変数の読み込み
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
 
 # CHUNITHM 公式ニュースサイトのURL
 NEWS_SITE_URL = 'https://info-chunithm.sega.jp/'
@@ -20,9 +21,27 @@ LAST_NEWS_URL_FILE = 'last_news_url.txt'
 intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(discord_client)
 
 # エラー状態を管理するフラグ
 is_in_error_state = False
+
+CHANNELS_FILE = 'channels.json'
+
+def get_registered_channels():
+    """登録されているチャンネルIDのリストを取得する"""
+    if os.path.exists(CHANNELS_FILE):
+        try:
+            with open(CHANNELS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
+    return []
+
+def save_registered_channels(channels):
+    """登録されているチャンネルIDのリストを保存する"""
+    with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(channels, f, indent=4)
 
 def get_saved_news_url():
     """前回投稿したニュースのURLをファイルから読み込む"""
@@ -73,14 +92,40 @@ async def fetch_latest_news():
     return None
 
 @discord_client.event
+async def on_guild_join(guild):
+    print(f'Discord: {guild.name} に参加しました！')
+    
+    greeting = (
+        "やっほ～！　プレイヤーさん！\n"
+        "CHUNITHM公式ニュースBotの追加、ありがとう！\n"
+        "私がいれば、最新のニュースをすぐにこのサーバーにお届けしちゃうよ～！！\n\n"
+        "さ、プレイヤーさん！準備いい？\n"
+        "ニュースを流したいチャンネルで `/news_register` って入力してね！\n"
+        "そこから私とサーバーをリンク接続しちゃうから！よろしくね～！"
+    )
+    
+    if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
+        await guild.system_channel.send(greeting)
+        return
+        
+    for channel in guild.text_channels:
+        if channel.permissions_for(guild.me).send_messages:
+            await channel.send(greeting)
+            return
+
+@discord_client.event
 async def on_ready():
     print(f'Discord: {discord_client.user} としてログインしました！')
 
-    if not TARGET_CHANNEL_ID:
-        print("エラー: .env に TARGET_CHANNEL_ID が設定されていません。")
-        return
+    try:
+        synced = await tree.sync()
+        print(f"Discord: {len(synced)} 個のコマンドを同期しました。")
+    except Exception as e:
+        print(f"Discord: コマンドの同期に失敗しました: {e}")
 
-    print(f'Discord: 対象チャンネルID -> {TARGET_CHANNEL_ID}')
+    channels = get_registered_channels()
+    print(f'Discord: 現在登録されているチャンネル数 -> {len(channels)}')
+
     print("Botの準備が完了しました。10分に1回の監視タスクを開始します...")
     # 初回起動時に現在の最新を取得しておく（未保存の場合のみ）
     if not get_saved_news_url():
@@ -90,6 +135,28 @@ async def on_ready():
             print(f"初期設定: 最新ニュースを保存しました ({latest['url']})")
 
     check_new_news.start()
+
+@tree.command(name="news_register", description="このチャンネルにチュウニズムの最新ニュースを通知します。")
+async def news_register(interaction: discord.Interaction):
+    channels = get_registered_channels()
+    if interaction.channel_id in channels:
+        await interaction.response.send_message("えへへ、このチャンネルはもう私とリンク接続済みだよ～！", ephemeral=True)
+        return
+        
+    channels.append(interaction.channel_id)
+    save_registered_channels(channels)
+    await interaction.response.send_message("✅ リンク接続完了！これからここに最新ニュースをバンバンお届けしちゃうよ～！")
+
+@tree.command(name="news_unregister", description="このチャンネルでのチュウニズムニュース通知を解除します。")
+async def news_unregister(interaction: discord.Interaction):
+    channels = get_registered_channels()
+    if interaction.channel_id not in channels:
+        await interaction.response.send_message("あれれ？このチャンネルはまだ私とリンク接続してないみたい！", ephemeral=True)
+        return
+        
+    channels.remove(interaction.channel_id)
+    save_registered_channels(channels)
+    await interaction.response.send_message("❌ リンク接続を解除したよ！今までありがとう、プレイヤーさん！またいつでも呼んでね～！")
 
 @tasks.loop(minutes=10)
 async def check_new_news():
@@ -115,18 +182,18 @@ async def check_new_news():
             return
 
         # 新規ニュース発見
-        print(f"公式サイト: 新規ニュースを検出！ ({latest['title']})")
-
-        channel = discord_client.get_channel(int(TARGET_CHANNEL_ID))
-        if channel is None:
-            print(f"エラー: チャンネルが見つかりませんでした。ID: {TARGET_CHANNEL_ID}")
+        channels = get_registered_channels()
+        if not channels:
+            print(f"公式サイト: 新規ニュース({latest['title']})を発見しましたが、通知先のチャンネルが登録されていません。")
+            save_news_url(latest['url'])
             return
+
+        print(f"公式サイト: 新規ニュースを検出！ ({latest['title']})")
 
         # ニュースタイトルから不要な文字列(NEW!!など)を除去して整形
         clean_title = latest['title'].replace('NEW!!', '').strip()
         
         # 投稿メッセージ (例: 2026.04.01 (水) 「タイトル」)
-        # 日付とタイトルの間にスペースがあることを前提に、最初の一致（日付部分）を分離
         import re
         date_pattern = r'^\d{4}\.\d{2}\.\d{2} \(.+?\)'
         date_match = re.search(date_pattern, clean_title)
@@ -140,18 +207,38 @@ async def check_new_news():
 
         # 投稿メッセージ (Embed形式)
         embed = discord.Embed(
-            title="CHUNITHM公式サイトに新しいニュースが掲載されました！",
+            title="CHUNITHM公式サイトに新しいニュースが掲載されたよ～！",
             description=f"{formatted_title}\n{latest['url']}",
             color=0x00A2E8 # チュウニズムっぽい色
         )
         
         if latest.get('image_url'):
             embed.set_image(url=latest['image_url'])
-            
-        await channel.send(embed=embed)
 
+        # 登録されている全チャンネルに送信
+        valid_channels = []
+        for channel_id in channels:
+            channel = discord_client.get_channel(channel_id)
+            if channel is None:
+                print(f"エラー: チャンネルが見つかりませんでした。リストから除外します。ID: {channel_id}")
+                continue
+            
+            try:
+                await channel.send(embed=embed)
+                valid_channels.append(channel_id)
+            except discord.errors.Forbidden:
+                print(f"エラー: チャンネルへの送信権限がありません。リストから除外します。ID: {channel_id}")
+            except Exception as e:
+                print(f"チャンネル {channel_id} への送信中にエラーが発生しました: {e}")
+                # 一時的なエラーの可能性もあるため、リストからは除外しない
+                valid_channels.append(channel_id)
+
+        # 権限エラー等で無効になったチャンネルがあれば更新
+        if len(valid_channels) != len(channels):
+            save_registered_channels(valid_channels)
+            
         save_news_url(latest['url'])
-        print("Discord: 送信完了しました。")
+        print("Discord: 全チャンネルへの送信処理が完了しました。")
 
     except Exception as e:
         error_msg = f"ニュースチェック中にエラーが発生しました: {e}"
@@ -159,14 +246,18 @@ async def check_new_news():
         
         # エラー状態でない場合のみDiscordに通知
         if not is_in_error_state:
-            try:
-                channel = discord_client.get_channel(int(TARGET_CHANNEL_ID))
-                if channel:
-                    await channel.send(f"⚠️ **Botエラー通知** ⚠️\n公式サイトの監視中にエラーが発生しました。\n```\n{e}\n```")
+            channels = get_registered_channels()
+            if channels:
+                for channel_id in channels:
+                    try:
+                        channel = discord_client.get_channel(channel_id)
+                        if channel:
+                            await channel.send(f"⚠️ **エラー通知** ⚠️\nうぇ～ん、公式サイトの監視中にエラーが起きちゃったみたい……。\n```\n{e}\n```")
+                    except Exception as inner_e:
+                        print(f"チャンネル {channel_id} へのエラー通知の送信失敗: {inner_e}")
+                
                 # 通知後にエラー状態をオンにする
                 is_in_error_state = True
-            except Exception as inner_e:
-                print(f"エラー通知の送信失敗: {inner_e}")
         else:
             print("※現在エラー状態が継続中のため、Discordへの再通知をスキップしました。")
 
