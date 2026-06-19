@@ -21,6 +21,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 discord_client = discord.Client(intents=intents)
 
+# エラー状態を管理するフラグ
+is_in_error_state = False
+
 def get_saved_news_url():
     """前回投稿したニュースのURLをファイルから読み込む"""
     if os.path.exists(LAST_NEWS_URL_FILE):
@@ -38,7 +41,7 @@ async def fetch_latest_news():
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=10.0) as client:
         response = await client.get(NEWS_SITE_URL)
         if response.status_code != 200:
             raise Exception(f"サイトへのアクセスに失敗しました (Status: {response.status_code})")
@@ -91,9 +94,15 @@ async def on_ready():
 @tasks.loop(minutes=10)
 async def check_new_news():
     """10分に1回実行されるニュース監視タスク"""
+    global is_in_error_state
     print("公式サイト: 最新ニュースのチェックを開始します...")
     try:
         latest = await fetch_latest_news()
+        
+        # 正常に取得できた場合、エラー状態をリセット
+        if is_in_error_state:
+            print("公式サイト: エラー状態から復旧しました。")
+            is_in_error_state = False
 
         if not latest:
             print("公式サイト: ニュースが取得できませんでした。")
@@ -147,12 +156,19 @@ async def check_new_news():
     except Exception as e:
         error_msg = f"ニュースチェック中にエラーが発生しました: {e}"
         print(error_msg)
-        try:
-            channel = discord_client.get_channel(int(TARGET_CHANNEL_ID))
-            if channel:
-                await channel.send(f"⚠️ **Botエラー通知** ⚠️\n公式サイトの監視中にエラーが発生しました。\n```\n{e}\n```")
-        except Exception as inner_e:
-            print(f"エラー通知の送信失敗: {inner_e}")
+        
+        # エラー状態でない場合のみDiscordに通知
+        if not is_in_error_state:
+            try:
+                channel = discord_client.get_channel(int(TARGET_CHANNEL_ID))
+                if channel:
+                    await channel.send(f"⚠️ **Botエラー通知** ⚠️\n公式サイトの監視中にエラーが発生しました。\n```\n{e}\n```")
+                # 通知後にエラー状態をオンにする
+                is_in_error_state = True
+            except Exception as inner_e:
+                print(f"エラー通知の送信失敗: {inner_e}")
+        else:
+            print("※現在エラー状態が継続中のため、Discordへの再通知をスキップしました。")
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:

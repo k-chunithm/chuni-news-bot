@@ -48,7 +48,7 @@ GCPの「Always Free（無期限無料枠）」内で運用するための推奨
 
 - **リージョン**: `us-west1` (オレゴン), `us-central1` (アイオワ), `us-east1` (サウスカロライナ) のいずれかを選択。
 - **マシンタイプ**: `e2-micro` (2 vCPU, 1 GB メモリ)。
-- **ブートディスク**: 
+- **ブートディスク**:
   - タイプ: **標準永続ディスク** (Standard Persistent Disk) を選択（※バランスまたはSSDは有料になる場合があります）。
   - サイズ: 30 GB 以下。
 - **OS**: Debian または Ubuntu (LTS) を推奨。
@@ -73,24 +73,24 @@ GCPのブラウザターミナルを使わず、ローカルのMacターミナ�
 2. **Macからファイルを転送**
    手元のMacのターミナルで実行してください。
    ```bash
-   scp bot.py .env requirements.txt k_chunithm@8.229.250.63:~/chuni_news_bot/
+   scp bot.py .env requirements.txt [ユーザー名]@[サーバーのIPアドレス]:~/chuni_news_bot/
    ```
 
 3. **サーバーにSSH接続してアプリを構築**
    ```bash
-   ssh k_chunithm@8.229.250.63
+   ssh [ユーザー名]@[サーバーのIPアドレス]
    cd chuni_news_bot
-   
+
    # 仮想環境の作成
    python3 -m venv venv
-   
+
    # 実行画面（tmux）の作成
    tmux new -s bot
-   
+
    # 実行準備
    source venv/bin/activate
    pip install -r requirements.txt
-   
+
    # Bot起動
    python3 bot.py
    ```
@@ -111,3 +111,27 @@ GCPのブラウザターミナルを使わず、ローカルのMacターミナ�
    ```
 3. **停止・再起動**
    `Ctrl + C` で一度止めてから、`python3 bot.py` で再度実行します。
+
+### 5. ローカルでコードを修正し、GCPサーバーに反映させる手順
+ローカル（Mac）で `bot.py` などを修正した後、その変更をサーバー上のBotに適用するための手順です。
+
+1. **ローカルからサーバーへ新しいファイルを送信 (scp)**
+   Macのターミナルで `chuni-news-bot` フォルダを開き、以下のコマンドで上書き送信します。
+   ```bash
+   scp bot.py k_chunithm@8.229.250.63:~/chuni_news_bot/
+   ```
+
+2. **サーバーに接続して実行画面（tmux）を開く**
+   ```bash
+   ssh k_chunithm@8.229.250.63
+   tmux attach -t bot
+   ```
+
+3. **Botを再起動する**
+   動いているBotを `Ctrl + C` で一度止め、再度実行します。
+   ```bash
+   python3 bot.py
+   ```
+
+4. **実行画面から抜ける（デタッチ）**
+   起動を確認したら、`Ctrl + B` を押した直後に `D` を押し、Botを裏で動かしたままログアウトします。
