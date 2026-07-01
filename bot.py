@@ -7,6 +7,11 @@ from bs4 import BeautifulSoup
 from discord.ext import tasks
 from discord import app_commands
 from dotenv import load_dotenv
+import datetime
+import calendar
+
+# タイムゾーンの設定 (JST)
+JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
 
 # 環境変数の読み込み
 load_dotenv()
@@ -135,6 +140,7 @@ async def on_ready():
             print(f"初期設定: 最新ニュースを保存しました ({latest['url']})")
 
     check_new_news.start()
+    end_of_month_reminder.start()
 
 @tree.command(name="news_register", description="このチャンネルにチュウニズムの最新ニュースを通知します。")
 async def news_register(interaction: discord.Interaction):
@@ -260,6 +266,50 @@ async def check_new_news():
                 is_in_error_state = True
         else:
             print("※現在エラー状態が継続中のため、Discordへの再通知をスキップしました。")
+
+@tasks.loop(time=datetime.time(hour=12, minute=0, tzinfo=JST))
+async def end_of_month_reminder():
+    """月末から3日前の昼12時に実行されるリマインドタスク"""
+    now = datetime.datetime.now(JST)
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    
+    # 月末から3日前かどうかを判定 (例: 31日の場合は28日)
+    if now.day == last_day - 3:
+        print("月末リマインド: 条件を満たしたため、通知を送信します。")
+        channels = get_registered_channels()
+        if not channels:
+            return
+            
+        embed = discord.Embed(
+            title="🔔 月末のリマインドだよ～！",
+            description=(
+                "やっほ～！　プレイヤーさん！\n"
+                "月末が近づいてるので、CHUNITHM-NETのアイテム交換所でチケットやスタチュウのpt交換予定がある方はお忘れなく～！\n\n"
+                "交換忘れちゃったらもったいないからね！"
+            ),
+            color=0xFFB6C1 # ユニちゃんをイメージしたピンク色
+        )
+        embed.set_image(url="attachment://shop_entrance.png")
+        
+        valid_channels = []
+        for channel_id in channels:
+            channel = discord_client.get_channel(channel_id)
+            if channel is None:
+                continue
+            
+            try:
+                file = discord.File("figs/shop_entrance.png", filename="shop_entrance.png")
+                await channel.send(file=file, embed=embed)
+                valid_channels.append(channel_id)
+            except discord.errors.Forbidden:
+                print(f"月末リマインド: チャンネルへの送信権限がありません (ID: {channel_id})")
+            except Exception as e:
+                print(f"月末リマインド: チャンネル {channel_id} への送信中にエラーが発生しました: {e}")
+                valid_channels.append(channel_id)
+                
+        # 権限エラー等で無効になったチャンネルがあれば更新
+        if len(valid_channels) != len(channels):
+            save_registered_channels(valid_channels)
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
