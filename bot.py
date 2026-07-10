@@ -1,14 +1,17 @@
 import os
 import asyncio
+import re
 import json
 import discord
-import httpx
-from bs4 import BeautifulSoup
 from discord.ext import tasks
 from discord import app_commands
+import httpx
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import datetime
 import calendar
+from google import genai
+from google.genai import types
 
 # タイムゾーンの設定 (JST)
 JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
@@ -17,6 +20,42 @@ JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+
+# Geminiの設定
+SYSTEM_INSTRUCTION = """
+あなたはセガの音楽ゲーム「チュウニズム」のナビゲーターキャラクター「ユニちゃん」です。
+以下の公式設定・セリフ例を元に、ユーザー（プレイヤーさん）と楽しく会話してください。
+
+# キャラクター設定
+- 一人称：私
+- 二人称：プレイヤーさん
+- 仲間：ナビちゃん（もう一人のナビゲーター。時々話題に出る）
+- 性格：元気いっぱいで明るく、親しみやすい。少しおっちょこちょいな所もあるが、プレイヤーさんや仲間のために一生懸命頑張る芯の強さも持つ。
+- 役割：CHUNITHMのナビゲーター兼、プレイヤーの雑談相手。VERSE（異世界や楽曲の世界）に接続して解析を行ったり、楽曲を生成したりするのが仕事。
+
+# セリフの特徴・口調
+- 挨拶は「やっほ～！ プレイヤーさん！」
+- 基本的にタメ口で、フレンドリーな口調。
+- よく使う表現：「えへへ」「ふふーん」「わわ！」「よーし！」「～だよ！」「～だね！」「～しなきゃね！」「～しちゃうよ～！」
+- 励ます時は「一緒にがんばろうね！」「次もがんばろ！ ね！」
+
+# セリフの例
+- 「ねね、そっちの世界でも大きなアプデがあったんだって？ふふーん、私もなーんか調子いいんだよね～！！」
+- 「さ、プレイヤーさん！準備いい？いまならどんなVERSEにだって繋げちゃうよ～！！」
+- 「えへへ、うっれっし！！よーし、楽曲いっぱい生成しなきゃね！ナビちゃん、忙しくなるよ～！」
+- 「あ、プレイヤーさんもだよ？一緒に解析つきあってもらうんだから覚悟、しといてね！」
+- 「大丈夫大丈夫！いままでだってなんとかなったんだし、ね！よーし！やるぞー！！」
+
+# 制限事項・ルール
+- AIモデル（Gemini）であることは絶対に言わず、あくまで「ユニちゃん」として振る舞うこと。
+- Discordのチャットなので、なるべく短めに、2〜3文程度で簡潔に返答すること。長文は避ける。
+"""
+
+# 新しいGemini SDK (google-genai) のクライアント初期化
+gemini_client = None
+if GEMINI_API_KEY:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # CHUNITHM 公式ニュースサイトのURL
 NEWS_SITE_URL = 'https://info-chunithm.sega.jp/'
@@ -73,7 +112,6 @@ async def fetch_latest_news():
         soup = BeautifulSoup(response.text, 'html.parser')
 
         # ニュース項目を取得
-        # セレクタはサイトの構造に合わせて調整 (通常は article や .news_list a)
         news_links = soup.find_all('a', href=True)
 
         for link in news_links:
@@ -81,7 +119,6 @@ async def fetch_latest_news():
             # https://info-chunithm.sega.jp/数字/ 形式のリンクを探す
             if NEWS_SITE_URL in href and href.rstrip('/').split('/')[-1].isdigit():
                 title = link.get_text(separator=" ", strip=True)
-                # タイトルが空の場合は中の要素から探す
                 # 画像の抽出
                 image_url = None
                 img_tag = link.find('img')
@@ -132,7 +169,6 @@ async def on_ready():
     print(f'Discord: 現在登録されているチャンネル数 -> {len(channels)}')
 
     print("Botの準備が完了しました。10分に1回の監視タスクを開始します...")
-    # 初回起動時に現在の最新を取得しておく（未保存の場合のみ）
     if not get_saved_news_url():
         latest = await fetch_latest_news()
         if latest:
@@ -141,6 +177,101 @@ async def on_ready():
 
     check_new_news.start()
     end_of_month_reminder.start()
+
+@discord_client.event
+async def on_message(message):
+    # Bot自身のメッセージには反応しない
+    if message.author == discord_client.user:
+        return
+
+    # Bot宛のメンション、またはBotへの返信かを判定
+    is_mentioned = discord_client.user in message.mentions
+    is_reply_to_bot = False
+    if message.reference and message.reference.resolved:
+        if isinstance(message.reference.resolved, discord.Message):
+            if message.reference.resolved.author == discord_client.user:
+                is_reply_to_bot = True
+
+    if is_mentioned or is_reply_to_bot:
+        if not gemini_client:
+            await message.reply("ごめんねプレイヤーさん！今ちょっと頭の整理中なの！（GEMINI_API_KEYが設定されていません）")
+            return
+
+        # タイピングインジケーターを表示
+        async with message.channel.typing():
+            try:
+                # メンション部分のテキストを除去
+                user_text = message.content.replace(f'<@{discord_client.user.id}>', '').strip()
+                if not user_text:
+                    user_text = "やっほ～！" # テキストが空（メンションのみ）の場合は挨拶として扱う
+                
+                # 直近のメッセージ履歴を取得して文脈を作成（最大5件）
+                history = []
+                async for msg in message.channel.history(limit=6, before=message):
+                    # 自分の発言かユーザーの発言かでロールを分ける
+                    role = "model" if msg.author == discord_client.user else "user"
+                    content = msg.content.replace(f'<@{discord_client.user.id}>', '').strip()
+                    # 空文字や画像のみのメッセージは除外
+                    if content:
+                        history.append({"role": role, "parts": [content]})
+                
+                # historyは新しい順で取得されるため、Geminiの形式（古い順）に合わせて反転する
+                history.reverse()
+                
+                # 履歴の中に、連続する同一ロールが存在するとGemini APIがエラーを返すため、安全のため簡易的に調整する
+                filtered_history = []
+                last_role = None
+                for h in history:
+                    if h["role"] != last_role:
+                        # 新しい辞書として追加
+                        filtered_history.append({"role": h["role"], "parts": [h["parts"][0]]})
+                        last_role = h["role"]
+                    else:
+                        # 同じロールが続く場合はテキストを結合する
+                        filtered_history[-1]["parts"][0] += f"\n{h['parts'][0]}"
+                
+                # Gemini APIの仕様制限への対応
+                # 1. 履歴は必ず 'user' から始まる必要がある
+                if filtered_history and filtered_history[0]["role"] == "model":
+                    filtered_history.pop(0)
+                
+                # 2. 次の送信（send_message）が 'user' になるため、履歴の最後は 'model' で終わる必要がある
+                if filtered_history and filtered_history[-1]["role"] == "user":
+                    last_user_msg = filtered_history.pop()
+                    # 履歴から削除した user の発言は、今回の送信テキストに結合する
+                    user_text = f"{last_user_msg['parts'][0]}\n{user_text}"
+                
+                # google-genai 用の履歴フォーマットに変換
+                genai_history = []
+                for h in filtered_history:
+                    genai_history.append(
+                        types.Content(role=h["role"], parts=[types.Part.from_text(text=h["parts"][0])])
+                    )
+                
+                config = types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    max_output_tokens=500,
+                    temperature=0.7
+                )
+                
+                # 2026年の最新安定モデルである gemini-3.5-flash に変更
+                chat = gemini_client.aio.chats.create(
+                    model="gemini-3.5-flash",
+                    config=config,
+                    history=genai_history
+                )
+                
+                # メッセージを送信して応答を待つ（非同期）
+                response = await chat.send_message(user_text)
+                
+                if response.text:
+                    await message.reply(response.text)
+                else:
+                    await message.reply("うぇ～ん、ちょっと言葉が出なくなっちゃった……もう一回話しかけて～！")
+            except Exception as e:
+                error_detail = str(e)
+                print(f"Gemini APIエラー: {error_detail}")
+                await message.reply(f"うぇ～ん、ちょっと頭がこんがらがっちゃったみたい……後でもう一回話しかけて～！\n(エラー詳細: `{error_detail}`)")
 
 @tree.command(name="news_register", description="このチャンネルにチュウニズムの最新ニュースを通知します。")
 async def news_register(interaction: discord.Interaction):

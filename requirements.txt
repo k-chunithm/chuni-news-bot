@@ -3,3 +3,4 @@ beautifulsoup4
 httpx
 python-dotenv
 asyncio
+google-genai

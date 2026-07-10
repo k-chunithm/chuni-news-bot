@@ -41,6 +41,7 @@ pip install -r requirements.txt
 `.env` ファイルを作成し、以下の情報を記述します。
 ```env
 DISCORD_TOKEN=あなたのDiscordボットトークン
+GEMINI_API_KEY=あなたのGemini APIキー (任意: ユニちゃんとの会話機能を使用する場合)
 ```
 
 ---
@@ -106,7 +107,7 @@ GCPのブラウザターミナルを使わず、ローカルのMacターミナ�
 ### 4. 2回目以降（エラー時や再起動時）
 1. **サーバーに接続**
    ```bash
-   ssh k_chunithm@8.229.250.63
+   ssh [ユーザー名]@[サーバーのIPアドレス]
    cd chuni_news_bot
    ```
 2. **実行画面に戻る（アタッチ）**
@@ -117,22 +118,28 @@ GCPのブラウザターミナルを使わず、ローカルのMacターミナ�
    `Ctrl + C` で一度止めてから、`python3 bot.py` で再度実行します。
 
 ### 5. ローカルでコードを修正し、GCPサーバーに反映させる手順
-ローカル（Mac）で `bot.py` などを修正した後、その変更をサーバー上のBotに適用するための手順です。
+ローカル（Mac）で `bot.py` や `requirements.txt` などを修正した後、その変更をサーバー上のBotに適用するための手順です。
 
 1. **ローカルからサーバーへ新しいファイルを送信 (scp)**
    Macのターミナルで `chuni-news-bot` フォルダを開き、以下のコマンドで上書き送信します。
+   （`.env` も更新した場合は含めてください）
    ```bash
-   scp bot.py k_chunithm@8.229.250.63:~/chuni_news_bot/
+   scp bot.py requirements.txt .env [ユーザー名]@[サーバーのIPアドレス]:~/chuni_news_bot/
    ```
 
 2. **サーバーに接続して実行画面（tmux）を開く**
    ```bash
-   ssh k_chunithm@8.229.250.63
+   ssh [ユーザー名]@[サーバーのIPアドレス]
    tmux attach -t bot
    ```
 
-3. **Botを再起動する**
-   動いているBotを `Ctrl + C` で一度止め、再度実行します。
+3. **Botを再起動する（＋必要な場合はパッケージ更新）**
+   動いているBotを `Ctrl + C` で一度止めます。
+   もし `requirements.txt` に新しいパッケージを追加した場合は、Botを起動する前に以下を実行してインストールします（ターミナルの左端に `(venv)` と表示されているか確認してください。表示されていない場合は `source venv/bin/activate` を実行します）。
+   ```bash
+   pip install -r requirements.txt
+   ```
+   その後、再度Botを実行します。
    ```bash
    python3 bot.py
    ```
