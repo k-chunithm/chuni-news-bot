@@ -4,3 +4,4 @@ httpx
 python-dotenv
 asyncio
 anthropic
+cloudscraper==1.2.71

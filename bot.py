@@ -56,6 +56,79 @@ anthropic_client = None
 if ANTHROPIC_API_KEY:
     anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
+def get_cached_system_prompt():
+    """キャラクター設定とスクレイピングした外部ファイルを結合し、プロンプトキャッシュを設定して返す"""
+    system_blocks = [
+        {
+            "type": "text",
+            "text": SYSTEM_INSTRUCTION
+        }
+    ]
+    
+    context_files = [
+        ("prompt_cache/chunithm_wiki_data.txt", "【CHUNITHM Wiki 情報】\n"),
+        ("prompt_cache/chunithm_const_data.txt", "【CHUNITHM 楽曲レベル・定数など JSONデータ】\n"),
+        ("prompt_cache/yuni_character_data.txt", "【ユニちゃん キャラクター設定詳細】\n"),
+        ("prompt_cache/yjsp_wiki_data.txt", "【淫夢語録（参考コンテキスト）】\n")
+    ]
+    
+    combined_context = ""
+    for filename, header in context_files:
+        if os.path.exists(filename):
+            try:
+                with open(filename, "r", encoding="utf-8") as f:
+                    combined_context += header + f.read() + "\n\n"
+            except Exception as e:
+                print(f"{filename} の読み込みエラー: {e}")
+                
+    if combined_context:
+        # すべての外部データを1つのブロックにまとめ、最後にキャッシュコントロールを付与する
+        system_blocks.append({
+            "type": "text",
+            "text": combined_context,
+            "cache_control": {"type": "ephemeral"}
+        })
+        
+    return system_blocks
+
+def perform_web_search_sync(query: str) -> str:
+    import urllib.parse
+    import cloudscraper
+    from bs4 import BeautifulSoup
+    try:
+        scraper = cloudscraper.create_scraper()
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+        res = scraper.get(url, timeout=10)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        snippets = [a.text for a in soup.select('.result__snippet')]
+        if snippets:
+            return "Web検索結果:\n" + "\n".join(snippets[:5])
+        return "検索結果が見つかりませんでした。"
+    except Exception as e:
+        return f"検索エラー: {e}"
+
+async def perform_web_search(query: str) -> str:
+    return await asyncio.to_thread(perform_web_search_sync, query)
+
+# Claude用のツール定義
+TOOLS = [
+    {
+        "name": "search_web",
+        "description": "チュウニズムの最新のイベント情報などをWebで検索します。ユーザーが現在開催中のイベントや、わからないことについて聞いた時に使用してください。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "検索するキーワード（例：'CHUNITHM 今月の日替わりボーナス', 'チュウニズム 最新イベント'）"
+                }
+            },
+            "required": ["query"]
+        }
+    }
+]
+
 # CHUNITHM 公式ニュースサイトのURL
 NEWS_SITE_URL = 'https://info-chunithm.sega.jp/'
 LAST_NEWS_URL_FILE = 'last_news_url.txt'
@@ -273,18 +346,51 @@ async def on_message(message):
                 anthropic_history.append({"role": "user", "content": user_text})
                 
                 # Claude 4.5 Haiku で応答を生成（非同期）
-                response = await anthropic_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=500,
-                    temperature=0.7,
-                    system=SYSTEM_INSTRUCTION,
-                    messages=anthropic_history
-                )
-                
-                if response.content and len(response.content) > 0:
-                    await message.channel.send(response.content[0].text)
-                else:
-                    await message.channel.send("うぇ～ん、ちょっと言葉が出なくなっちゃった……もう一回話しかけて～！")
+                while True:
+                    response = await anthropic_client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=500,
+                        temperature=0.7,
+                        system=get_cached_system_prompt(),
+                        messages=anthropic_history,
+                        tools=TOOLS
+                    )
+                    
+                    if response.stop_reason == "tool_use":
+                        # アシスタントのメッセージ（ツール呼び出し）を履歴に追加
+                        anthropic_history.append({"role": "assistant", "content": response.content})
+                        
+                        for block in response.content:
+                            if block.type == "tool_use":
+                                if block.name == "search_web":
+                                    query = block.input["query"]
+                                    print(f"Tool execution: search_web(query='{query}')")
+                                    result_text = await perform_web_search(query)
+                                    
+                                    # ツール実行結果を履歴に追加
+                                    anthropic_history.append({
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "tool_result",
+                                                "tool_use_id": block.id,
+                                                "content": result_text
+                                            }
+                                        ]
+                                    })
+                        continue # 再度APIを呼び出す
+                    
+                    # ツール使用が終わった（または使用しなかった）場合
+                    text_content = ""
+                    for block in response.content:
+                        if block.type == "text":
+                            text_content += block.text
+                            
+                    if text_content:
+                        await message.channel.send(text_content)
+                    else:
+                        await message.channel.send("うぇ～ん、ちょっと言葉が出なくなっちゃった……もう一回話しかけて～！")
+                    break
             except Exception as e:
                 error_detail = str(e)
                 print(f"Anthropic APIエラー: {error_detail}")
