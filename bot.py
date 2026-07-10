@@ -10,8 +10,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import datetime
 import calendar
-from google import genai
-from google.genai import types
+from anthropic import AsyncAnthropic
 
 # タイムゾーンの設定 (JST)
 JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
@@ -20,9 +19,9 @@ JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
 
-# Geminiの設定
+# Claudeの設定
 SYSTEM_INSTRUCTION = """
 あなたはセガの音楽ゲーム「チュウニズム」のナビゲーターキャラクター「ユニちゃん」です。
 以下の公式設定・セリフ例を元に、ユーザー（プレイヤーさん）と楽しく会話してください。
@@ -48,14 +47,14 @@ SYSTEM_INSTRUCTION = """
 - 「大丈夫大丈夫！いままでだってなんとかなったんだし、ね！よーし！やるぞー！！」
 
 # 制限事項・ルール
-- AIモデル（Gemini）であることは絶対に言わず、あくまで「ユニちゃん」として振る舞うこと。
+- AIモデル（Claude）であることは絶対に言わず、あくまで「ユニちゃん」として振る舞うこと。
 - Discordのチャットなので、なるべく短めに、2〜3文程度で簡潔に返答すること。長文は避ける。
 """
 
-# 新しいGemini SDK (google-genai) のクライアント初期化
-gemini_client = None
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+# Anthropic SDKのクライアント初期化
+anthropic_client = None
+if ANTHROPIC_API_KEY:
+    anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 # CHUNITHM 公式ニュースサイトのURL
 NEWS_SITE_URL = 'https://info-chunithm.sega.jp/'
@@ -71,6 +70,7 @@ tree = app_commands.CommandTree(discord_client)
 is_in_error_state = False
 
 CHANNELS_FILE = 'channels.json'
+CHAT_CHANNELS_FILE = 'chat_channels.json'
 
 def get_registered_channels():
     """登録されているチャンネルIDのリストを取得する"""
@@ -85,6 +85,21 @@ def get_registered_channels():
 def save_registered_channels(channels):
     """登録されているチャンネルIDのリストを保存する"""
     with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(channels, f, indent=4)
+
+def get_chat_channels():
+    """自動会話が有効なチャンネルIDのリストを取得する"""
+    if os.path.exists(CHAT_CHANNELS_FILE):
+        try:
+            with open(CHAT_CHANNELS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
+    return []
+
+def save_chat_channels(channels):
+    """自動会話が有効なチャンネルIDのリストを保存する"""
+    with open(CHAT_CHANNELS_FILE, 'w', encoding='utf-8') as f:
         json.dump(channels, f, indent=4)
 
 def get_saved_news_url():
@@ -180,8 +195,8 @@ async def on_ready():
 
 @discord_client.event
 async def on_message(message):
-    # Bot自身のメッセージには反応しない
-    if message.author == discord_client.user:
+    # Bot自身のメッセージ、または他のBotからのメッセージには反応しない
+    if message.author.bot:
         return
 
     # Bot宛のメンション、またはBotへの返信かを判定
@@ -192,9 +207,15 @@ async def on_message(message):
             if message.reference.resolved.author == discord_client.user:
                 is_reply_to_bot = True
 
-    if is_mentioned or is_reply_to_bot:
-        if not gemini_client:
-            await message.reply("ごめんねプレイヤーさん！今ちょっと頭の整理中なの！（GEMINI_API_KEYが設定されていません）")
+    # 自動会話チャンネルでの発言かを判定
+    is_auto_chat = False
+    chat_channels = get_chat_channels()
+    if message.channel.id in chat_channels:
+        is_auto_chat = True
+
+    if is_mentioned or is_reply_to_bot or is_auto_chat:
+        if not anthropic_client:
+            await message.channel.send("ごめんねプレイヤーさん！今ちょっと頭の整理中なの！（ANTHROPIC_API_KEYが設定されていません）")
             return
 
         # タイピングインジケーターを表示
@@ -208,17 +229,17 @@ async def on_message(message):
                 # 直近のメッセージ履歴を取得して文脈を作成（最大5件）
                 history = []
                 async for msg in message.channel.history(limit=6, before=message):
-                    # 自分の発言かユーザーの発言かでロールを分ける
-                    role = "model" if msg.author == discord_client.user else "user"
+                    # 自分の発言かユーザーの発言かでロールを分ける (Anthropicでは 'assistant' と 'user')
+                    role = "assistant" if msg.author == discord_client.user else "user"
                     content = msg.content.replace(f'<@{discord_client.user.id}>', '').strip()
                     # 空文字や画像のみのメッセージは除外
                     if content:
                         history.append({"role": role, "parts": [content]})
                 
-                # historyは新しい順で取得されるため、Geminiの形式（古い順）に合わせて反転する
+                # historyは新しい順で取得されるため、APIの形式（古い順）に合わせて反転する
                 history.reverse()
                 
-                # 履歴の中に、連続する同一ロールが存在するとGemini APIがエラーを返すため、安全のため簡易的に調整する
+                # 履歴の中に、連続する同一ロールが存在するとAPIがエラーを返すため、安全のため簡易的に調整する
                 filtered_history = []
                 last_role = None
                 for h in history:
@@ -230,48 +251,66 @@ async def on_message(message):
                         # 同じロールが続く場合はテキストを結合する
                         filtered_history[-1]["parts"][0] += f"\n{h['parts'][0]}"
                 
-                # Gemini APIの仕様制限への対応
+                # Anthropic APIの仕様制限への対応
                 # 1. 履歴は必ず 'user' から始まる必要がある
-                if filtered_history and filtered_history[0]["role"] == "model":
+                if filtered_history and filtered_history[0]["role"] == "assistant":
                     filtered_history.pop(0)
                 
-                # 2. 次の送信（send_message）が 'user' になるため、履歴の最後は 'model' で終わる必要がある
+                # 2. 次の送信（send_message）が 'user' になるため、履歴の最後は 'assistant' で終わる必要がある
                 if filtered_history and filtered_history[-1]["role"] == "user":
                     last_user_msg = filtered_history.pop()
                     # 履歴から削除した user の発言は、今回の送信テキストに結合する
                     user_text = f"{last_user_msg['parts'][0]}\n{user_text}"
                 
-                # google-genai 用の履歴フォーマットに変換
-                genai_history = []
+                # Anthropic 用の履歴フォーマットに変換
+                anthropic_history = []
                 for h in filtered_history:
-                    genai_history.append(
-                        types.Content(role=h["role"], parts=[types.Part.from_text(text=h["parts"][0])])
+                    anthropic_history.append(
+                        {"role": h["role"], "content": h["parts"][0]}
                     )
                 
-                config = types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    max_output_tokens=500,
-                    temperature=0.7
+                # 最新のユーザーからのメッセージを追加
+                anthropic_history.append({"role": "user", "content": user_text})
+                
+                # Claude 4.5 Haiku で応答を生成（非同期）
+                response = await anthropic_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=500,
+                    temperature=0.7,
+                    system=SYSTEM_INSTRUCTION,
+                    messages=anthropic_history
                 )
                 
-                # 2026年の最新安定モデルである gemini-3.5-flash に変更
-                chat = gemini_client.aio.chats.create(
-                    model="gemini-3.5-flash",
-                    config=config,
-                    history=genai_history
-                )
-                
-                # メッセージを送信して応答を待つ（非同期）
-                response = await chat.send_message(user_text)
-                
-                if response.text:
-                    await message.reply(response.text)
+                if response.content and len(response.content) > 0:
+                    await message.channel.send(response.content[0].text)
                 else:
-                    await message.reply("うぇ～ん、ちょっと言葉が出なくなっちゃった……もう一回話しかけて～！")
+                    await message.channel.send("うぇ～ん、ちょっと言葉が出なくなっちゃった……もう一回話しかけて～！")
             except Exception as e:
                 error_detail = str(e)
-                print(f"Gemini APIエラー: {error_detail}")
-                await message.reply(f"うぇ～ん、ちょっと頭がこんがらがっちゃったみたい……後でもう一回話しかけて～！\n(エラー詳細: `{error_detail}`)")
+                print(f"Anthropic APIエラー: {error_detail}")
+                await message.channel.send(f"うぇ～ん、ちょっと頭がこんがらがっちゃったみたい……後でもう一回話しかけて～！\n(エラー詳細: `{error_detail}`)")
+
+@tree.command(name="chat_register", description="このチャンネルをユニちゃんとの自動会話（メンション不要）チャンネルに設定します。")
+async def chat_register(interaction: discord.Interaction):
+    channels = get_chat_channels()
+    if interaction.channel_id in channels:
+        await interaction.response.send_message("えへへ、このチャンネルはもう私といつでもお話しできる状態だよ～！", ephemeral=True)
+        return
+        
+    channels.append(interaction.channel_id)
+    save_chat_channels(channels)
+    await interaction.response.send_message("✅ 登録完了！これからここで話しかけてくれたら、メンションなしでもすぐにお返事しちゃうよ～！")
+
+@tree.command(name="chat_unregister", description="このチャンネルでの自動会話（メンション不要）設定を解除します。")
+async def chat_unregister(interaction: discord.Interaction):
+    channels = get_chat_channels()
+    if interaction.channel_id not in channels:
+        await interaction.response.send_message("あれれ？このチャンネルはまだいつでもお話しできる状態じゃないみたい！", ephemeral=True)
+        return
+        
+    channels.remove(interaction.channel_id)
+    save_chat_channels(channels)
+    await interaction.response.send_message("❌ 自動会話の登録を解除したよ！今までいっぱいお話ししてくれてありがとう、プレイヤーさん！")
 
 @tree.command(name="news_register", description="このチャンネルにチュウニズムの最新ニュースを通知します。")
 async def news_register(interaction: discord.Interaction):

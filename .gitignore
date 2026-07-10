@@ -4,6 +4,7 @@ last_news_url.txt
 venv/
 __pycache__/
 channels.json
+chat_channels.json
 list_models.py
 test_env/
 test_genai/
