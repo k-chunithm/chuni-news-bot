@@ -144,6 +144,22 @@ is_in_error_state = False
 
 CHANNELS_FILE = 'channels.json'
 CHAT_CHANNELS_FILE = 'chat_channels.json'
+TEAM_BOOST_FILE = 'team_boost.json'
+
+def get_team_boost_days():
+    """設定されたチームブースト日を取得する"""
+    if os.path.exists(TEAM_BOOST_FILE):
+        try:
+            with open(TEAM_BOOST_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+def save_team_boost_days(data):
+    """チームブースト日の設定を保存する"""
+    with open(TEAM_BOOST_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4)
 
 def get_registered_channels():
     """登録されているチャンネルIDのリストを取得する"""
@@ -265,6 +281,7 @@ async def on_ready():
 
     check_new_news.start()
     end_of_month_reminder.start()
+    team_boost_reminder.start()
 
 @discord_client.event
 async def on_message(message):
@@ -440,6 +457,94 @@ async def news_unregister(interaction: discord.Interaction):
     save_registered_channels(channels)
     await interaction.response.send_message("❌ リンク接続を解除したよ！今までありがとう、プレイヤーさん！またいつでも呼んでね～！")
 
+class TeamBoostView(discord.ui.View):
+    def __init__(self, year: int, month: int, max_days: int):
+        super().__init__(timeout=300)
+        self.year = year
+        self.month = month
+        
+        # 1〜15日
+        options_first_half = [
+            discord.SelectOption(label=f"{i}日", value=str(i)) for i in range(1, 16)
+        ]
+        self.select_first = discord.ui.Select(
+            placeholder="1日〜15日 (複数選択可)", 
+            min_values=0, 
+            max_values=15, 
+            options=options_first_half,
+            custom_id="select_first"
+        )
+        self.select_first.callback = self.select_callback
+        self.add_item(self.select_first)
+        
+        # 16日〜月末
+        options_second_half = [
+            discord.SelectOption(label=f"{i}日", value=str(i)) for i in range(16, max_days + 1)
+        ]
+        self.select_second = discord.ui.Select(
+            placeholder=f"16日〜{max_days}日 (複数選択可)", 
+            min_values=0, 
+            max_values=len(options_second_half), 
+            options=options_second_half,
+            custom_id="select_second"
+        )
+        self.select_second.callback = self.select_callback
+        self.add_item(self.select_second)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        # 選択が行われたときは何もせず、ボタンが押されるのを待つ
+        await interaction.response.defer()
+
+    @discord.ui.button(label="登録する", style=discord.ButtonStyle.primary, custom_id="submit_button")
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 選択された日付を取得
+        selected_days = []
+        if self.select_first.values:
+            selected_days.extend([int(v) for v in self.select_first.values])
+        if self.select_second.values:
+            selected_days.extend([int(v) for v in self.select_second.values])
+            
+        if len(selected_days) != 4:
+            await interaction.response.send_message(f"日付はちょうど4つ選んでね！ (現在 {len(selected_days)} 個選択中)", ephemeral=True)
+            return
+
+        selected_days.sort()
+        guild_id = str(interaction.guild_id)
+        
+        data = get_team_boost_days()
+        data[guild_id] = {
+            "year": self.year,
+            "month": self.month,
+            "days": selected_days
+        }
+        save_team_boost_days(data)
+        
+        days_str = ", ".join([f"{d}日" for d in selected_days])
+        await interaction.response.send_message(f"✅ {self.year}年{self.month}月のチームブースト日を **{days_str}** に設定したよ！\n当日の00:00にお知らせするね～！")
+        self.stop()
+
+@tree.command(name="boost_register", description="今月のチームブースト日をカレンダーから4つ登録します。")
+async def boost_register(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        await interaction.response.send_message("ごめんね、このコマンドはサーバー内でのみ使えるよ！", ephemeral=True)
+        return
+
+    now = datetime.datetime.now(JST)
+    year = now.year
+    month = now.month
+    
+    cal = calendar.TextCalendar(calendar.SUNDAY)
+    cal_str = cal.formatmonth(year, month)
+    max_days = calendar.monthrange(year, month)[1]
+    
+    view = TeamBoostView(year, month, max_days)
+    message_content = (
+        f"やっほ～！今月のチームブースト日を設定するよ！\n"
+        f"下のメニューから **4つの日付** を選んで「登録する」を押してね！\n"
+        f"```text\n{cal_str}```"
+    )
+    await interaction.response.send_message(message_content, view=view)
+
 @tasks.loop(minutes=10)
 async def check_new_news():
     """10分に1回実行されるニュース監視タスク"""
@@ -586,6 +691,47 @@ async def end_of_month_reminder():
         # 権限エラー等で無効になったチャンネルがあれば更新
         if len(valid_channels) != len(channels):
             save_registered_channels(valid_channels)
+
+@tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=JST))
+async def team_boost_reminder():
+    """毎日00:00にチームブースト日かどうかを判定し、通知を送信する"""
+    now = datetime.datetime.now(JST)
+    year = now.year
+    month = now.month
+    day = now.day
+    
+    data = get_team_boost_days()
+    if not data:
+        return
+        
+    channels = get_registered_channels()
+    if not channels:
+        return
+        
+    for channel_id in channels:
+        channel = discord_client.get_channel(channel_id)
+        if channel is None:
+            continue
+            
+        guild_id = str(channel.guild.id)
+        if guild_id in data:
+            guild_data = data[guild_id]
+            if guild_data["year"] == year and guild_data["month"] == month and day in guild_data["days"]:
+                try:
+                    embed = discord.Embed(
+                        title="✨ 今日はチームブースト日だよ！",
+                        description=(
+                            "やっほ～！　プレイヤーさん！\n"
+                            "今日はサーバーのチームブースト日！\n"
+                            "みんなでいっぱいプレイして、チームポイントを稼いじゃおうね～！"
+                        ),
+                        color=0xFFB6C1
+                    )
+                    await channel.send("@everyone", embed=embed)
+                except discord.errors.Forbidden:
+                    print(f"チームブースト通知: チャンネルへの送信権限がありません (ID: {channel_id})")
+                except Exception as e:
+                    print(f"チームブースト通知: チャンネル {channel_id} への送信中にエラーが発生しました: {e}")
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
