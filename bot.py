@@ -545,6 +545,21 @@ async def boost_register(interaction: discord.Interaction):
     )
     await interaction.response.send_message(message_content, view=view)
 
+@tree.command(name="boost_unregister", description="設定されているチームブースト日を解除します。")
+async def boost_unregister(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        await interaction.response.send_message("ごめんね、このコマンドはサーバー内でのみ使えるよ！", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild_id)
+    data = get_team_boost_days()
+    
+    if guild_id in data:
+        del data[guild_id]
+        save_team_boost_days(data)
+        await interaction.response.send_message("❌ チームブースト日の設定を解除したよ！またいつでも設定してね～！")
+    else:
+        await interaction.response.send_message("あれれ？このサーバーではまだチームブースト日が設定されてないみたい！", ephemeral=True)
 @tasks.loop(minutes=10)
 async def check_new_news():
     """10分に1回実行されるニュース監視タスク"""
@@ -703,6 +718,17 @@ async def team_boost_reminder():
     data = get_team_boost_days()
     if not data:
         return
+        
+    # 古い月（過去の月）の設定をリセット（削除）する処理
+    keys_to_delete = []
+    for gid, guild_data in data.items():
+        if guild_data["year"] < year or (guild_data["year"] == year and guild_data["month"] < month):
+            keys_to_delete.append(gid)
+            
+    if keys_to_delete:
+        for gid in keys_to_delete:
+            del data[gid]
+        save_team_boost_days(data)
         
     channels = get_registered_channels()
     if not channels:
