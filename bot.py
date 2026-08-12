@@ -282,6 +282,7 @@ async def on_ready():
     check_new_news.start()
     end_of_month_reminder.start()
     team_boost_reminder.start()
+    team_boost_setting_reminder.start()
 
 @discord_client.event
 async def on_message(message):
@@ -748,7 +749,7 @@ async def team_boost_reminder():
                         title="✨ 今日はチームブースト日だよ！",
                         description=(
                             "やっほ～！　プレイヤーさん！\n"
-                            "今日はサーバーのチームブースト日！\n"
+                            "今日はチームブースト日！\n"
                             "みんなでいっぱいプレイして、チームポイントを稼いじゃおうね～！"
                         ),
                         color=0xFFB6C1
@@ -758,6 +759,48 @@ async def team_boost_reminder():
                     print(f"チームブースト通知: チャンネルへの送信権限がありません (ID: {channel_id})")
                 except Exception as e:
                     print(f"チームブースト通知: チャンネル {channel_id} への送信中にエラーが発生しました: {e}")
+
+@tasks.loop(time=datetime.time(hour=12, minute=0, tzinfo=JST))
+async def team_boost_setting_reminder():
+    """毎月10日の昼12時に、チームブースト日が未設定の場合にリマインドする"""
+    now = datetime.datetime.now(JST)
+    if now.day != 10:
+        return
+        
+    data = get_team_boost_days()
+    channels = get_registered_channels()
+    if not channels:
+        return
+        
+    for channel_id in channels:
+        channel = discord_client.get_channel(channel_id)
+        if channel is None:
+            continue
+            
+        guild_id = str(channel.guild.id)
+        # 設定済みか判定
+        is_set = False
+        if guild_id in data:
+            guild_data = data[guild_id]
+            if guild_data["year"] == now.year and guild_data["month"] == now.month:
+                is_set = True
+                
+        if not is_set:
+            try:
+                embed = discord.Embed(
+                    title="⚠️ 今月のチームブースト日が未設定だよ！",
+                    description=(
+                        "やっほ～！　プレイヤーさん！\n"
+                        "今月のチームブースト日がまだ設定されていないみたい……！\n"
+                        "`/boost_register` コマンドで忘れずに設定してね！"
+                    ),
+                    color=0xFFB6C1
+                )
+                await channel.send(embed=embed)
+            except discord.errors.Forbidden:
+                print(f"チームブースト未設定通知: チャンネルへの送信権限がありません (ID: {channel_id})")
+            except Exception as e:
+                print(f"チームブースト未設定通知: チャンネル {channel_id} への送信中にエラーが発生しました: {e}")
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
