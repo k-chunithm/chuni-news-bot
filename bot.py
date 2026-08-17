@@ -10,7 +10,8 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import datetime
 import calendar
-from anthropic import AsyncAnthropic
+from groq import AsyncGroq
+import random
 
 # タイムゾーンの設定 (JST)
 JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
@@ -19,9 +20,9 @@ JST = datetime.timezone(datetime.timedelta(hours=9), 'JST')
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
-# Claudeの設定
+# Llama (Groq) の設定
 SYSTEM_INSTRUCTION = """
 あなたはセガの音楽ゲーム「チュウニズム」のナビゲーターキャラクター「ユニちゃん」です。
 以下の公式設定・セリフ例を元に、ユーザー（プレイヤーさん）と楽しく会話してください。
@@ -38,6 +39,7 @@ SYSTEM_INSTRUCTION = """
 - 基本的にタメ口で、フレンドリーな口調。
 - よく使う表現：「えへへ」「ふふーん」「わわ！」「よーし！」「～だよ！」「～だね！」「～しなきゃね！」「～しちゃうよ～！」
 - 励ます時は「一緒にがんばろうね！」「次もがんばろ！ ね！」
+- 【重要】プレイヤーが「AJ（オールジャスティス）」「FC（フルコンボ）」「AJC（理論値）」「鳥（SSS）」「鳥プラ（SSS+）」などの凄いスコアやリザルトを報告してくれた時は、「すごいすごい！」「おめでとう！」と自分のことのように大喜びして、思い切り褒め称えてください！間違っても「次もがんばろうね」などの事務的な励ましで終わらせないこと。
 
 # セリフの例
 - 「ねね、そっちの世界でも大きなアプデがあったんだって？ふふーん、私もなーんか調子いいんだよね～！！」
@@ -47,49 +49,47 @@ SYSTEM_INSTRUCTION = """
 - 「大丈夫大丈夫！いままでだってなんとかなったんだし、ね！よーし！やるぞー！！」
 
 # 制限事項・ルール
-- AIモデル（Claude）であることは絶対に言わず、あくまで「ユニちゃん」として振る舞うこと。
+- AIモデルであることは絶対に言わず、あくまで「ユニちゃん」として振る舞うこと。
 - Discordのチャットなので、なるべく短めに、2〜3文程度で簡潔に返答すること。長文は避ける。
+- 【重要】あなたは画像を直接検索したり、送信したりすることはできません。画像を求められた場合は「ごめんね、画像の検索や送信はできないんだ〜！」と明るく謝ってください。
 """
 
-# Anthropic SDKのクライアント初期化
-anthropic_client = None
-if ANTHROPIC_API_KEY:
-    anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+# Groq SDKのクライアント初期化
+groq_client = None
+if GROQ_API_KEY:
+    groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-def get_cached_system_prompt():
-    """キャラクター設定とスクレイピングした外部ファイルを結合し、プロンプトキャッシュを設定して返す"""
-    system_blocks = [
-        {
-            "type": "text",
-            "text": SYSTEM_INSTRUCTION
-        }
-    ]
+def get_system_prompt():
+    """キャラクター設定と、語録を結合して返す"""
+    prompt = SYSTEM_INSTRUCTION
     
-    context_files = [
-        ("prompt_cache/chunithm_wiki_data.txt", "【CHUNITHM Wiki 情報】\n"),
-        ("prompt_cache/chunithm_const_data.txt", "【CHUNITHM 楽曲レベル・定数など JSONデータ】\n"),
-        ("prompt_cache/yuni_character_data.txt", "【ユニちゃん キャラクター設定詳細】\n"),
-        ("prompt_cache/yjsp_wiki_data.txt", "【淫夢語録（参考コンテキスト）】\n")
-    ]
-    
-    combined_context = ""
-    for filename, header in context_files:
-        if os.path.exists(filename):
-            try:
-                with open(filename, "r", encoding="utf-8") as f:
-                    combined_context += header + f.read() + "\n\n"
-            except Exception as e:
-                print(f"{filename} の読み込みエラー: {e}")
-                
-    if combined_context:
-        # すべての外部データを1つのブロックにまとめ、最後にキャッシュコントロールを付与する
-        system_blocks.append({
-            "type": "text",
-            "text": combined_context,
-            "cache_control": {"type": "ephemeral"}
-        })
+    # 語録リストの読み込み（初回のみ）
+    if not hasattr(get_system_prompt, 'yjsp_quotes'):
+        try:
+            with open("prompt_cache/yjsp_wiki_data.txt", "r", encoding="utf-8") as f:
+                # 空行や短すぎる行を除外してリスト化
+                lines = [line.strip() for line in f if len(line.strip()) >= 3]
+                get_system_prompt.yjsp_quotes = lines
+        except Exception as e:
+            print(f"yjsp_wiki_data.txt の読み込みエラー: {e}")
+            get_system_prompt.yjsp_quotes = []
+            
+    if get_system_prompt.yjsp_quotes:
+        extra_rule = (
+            "\n\n# インターネット・ミームについての知識\n"
+            "- あなたはネットスラング（特に「淫夢語録」）に精通しており、ユーザーがそれらを話題に出した場合はノリよく反応します。\n"
+            "- 会話の流れがふさわしい場合、以下の【語録リスト】から自然に混ぜて会話を盛り上げてください。\n"
+            "- 【超重要】語録を使う場合でも、絶対に「ユニちゃん」のキャラクター（一人称は私、元気で親しみやすいタメ口）を崩さないでください！語録に引っ張られておっさん言葉や乱暴な口調になるのは厳禁です。\n"
+            "- 語録はあくまでスパイスとして、自然な文脈で1回の返答につき1個程度に留めてください。\n"
+            "- 良い例：「やっほ～！プレイヤーさん！今日もチュウニズム、やりますねぇ！一緒にがんばろうね！」\n"
+            "- 悪い例：「オッスオッス！お前のことが好きだったんだよ！やったぜ。」（ユニちゃんの原型がないためNG）\n\n"
+            "【語録リスト】\n"
+        )
+        extra_rule += "\n".join(f"- {q}" for q in get_system_prompt.yjsp_quotes)
+        extra_rule += "\n\n※最後にもう一度確認です。あなたは「ユニちゃん」です。語録を使う際も、絶対にユニちゃんの口調と性格を最優先で維持してください。"
+        prompt += extra_rule
         
-    return system_blocks
+    return prompt
 
 def perform_web_search_sync(query: str) -> str:
     import urllib.parse
@@ -111,20 +111,23 @@ def perform_web_search_sync(query: str) -> str:
 async def perform_web_search(query: str) -> str:
     return await asyncio.to_thread(perform_web_search_sync, query)
 
-# Claude用のツール定義
+# Groq用のツール定義
 TOOLS = [
     {
-        "name": "search_web",
-        "description": "チュウニズムの最新のイベント情報などをWebで検索します。ユーザーが現在開催中のイベントや、わからないことについて聞いた時に使用してください。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "検索するキーワード（例：'CHUNITHM 今月の日替わりボーナス', 'チュウニズム 最新イベント'）"
-                }
-            },
-            "required": ["query"]
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "チュウニズムの最新のイベント情報などをWebで検索します。ユーザーが現在開催中のイベントや、わからないことについて聞いた時に使用してください。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "検索するキーワード（例：'CHUNITHM 今月の日替わりボーナス', 'チュウニズム 最新イベント'）"
+                    }
+                },
+                "required": ["query"]
+            }
         }
     }
 ]
@@ -305,8 +308,8 @@ async def on_message(message):
         is_auto_chat = True
 
     if is_mentioned or is_reply_to_bot or is_auto_chat:
-        if not anthropic_client:
-            await message.channel.send("ごめんねプレイヤーさん！今ちょっと頭の整理中なの！（ANTHROPIC_API_KEYが設定されていません）")
+        if not groq_client:
+            await message.channel.send("ごめんねプレイヤーさん！今ちょっと頭の整理中なの！（GROQ_API_KEYが設定されていません）")
             return
 
         # タイピングインジケーターを表示
@@ -320,89 +323,91 @@ async def on_message(message):
                 # 直近のメッセージ履歴を取得して文脈を作成（最大5件）
                 history = []
                 async for msg in message.channel.history(limit=6, before=message):
-                    # 自分の発言かユーザーの発言かでロールを分ける (Anthropicでは 'assistant' と 'user')
+                    # 自分の発言かユーザーの発言かでロールを分ける
                     role = "assistant" if msg.author == discord_client.user else "user"
                     content = msg.content.replace(f'<@{discord_client.user.id}>', '').strip()
                     # 空文字や画像のみのメッセージは除外
                     if content:
-                        history.append({"role": role, "parts": [content]})
+                        history.append({"role": role, "content": content})
                 
                 # historyは新しい順で取得されるため、APIの形式（古い順）に合わせて反転する
                 history.reverse()
                 
-                # 履歴の中に、連続する同一ロールが存在するとAPIがエラーを返すため、安全のため簡易的に調整する
+                # Groq(OpenAI) 用の履歴フォーマットに変換
+                groq_messages = [{"role": "system", "content": get_system_prompt()}]
+                
+                # 履歴の中に、連続する同一ロールが存在するとモデルが混乱する場合があるため、調整する
                 filtered_history = []
                 last_role = None
                 for h in history:
                     if h["role"] != last_role:
-                        # 新しい辞書として追加
-                        filtered_history.append({"role": h["role"], "parts": [h["parts"][0]]})
+                        filtered_history.append({"role": h["role"], "content": h["content"]})
                         last_role = h["role"]
                     else:
-                        # 同じロールが続く場合はテキストを結合する
-                        filtered_history[-1]["parts"][0] += f"\n{h['parts'][0]}"
+                        filtered_history[-1]["content"] += f"\n{h['content']}"
                 
-                # Anthropic APIの仕様制限への対応
-                # 1. 履歴は必ず 'user' から始まる必要がある
-                if filtered_history and filtered_history[0]["role"] == "assistant":
-                    filtered_history.pop(0)
-                
-                # 2. 次の送信（send_message）が 'user' になるため、履歴の最後は 'assistant' で終わる必要がある
-                if filtered_history and filtered_history[-1]["role"] == "user":
-                    last_user_msg = filtered_history.pop()
-                    # 履歴から削除した user の発言は、今回の送信テキストに結合する
-                    user_text = f"{last_user_msg['parts'][0]}\n{user_text}"
-                
-                # Anthropic 用の履歴フォーマットに変換
-                anthropic_history = []
-                for h in filtered_history:
-                    anthropic_history.append(
-                        {"role": h["role"], "content": h["parts"][0]}
-                    )
+                groq_messages.extend(filtered_history)
                 
                 # 最新のユーザーからのメッセージを追加
-                anthropic_history.append({"role": "user", "content": user_text})
+                # 連続するuserメッセージになる場合は結合する
+                if groq_messages[-1]["role"] == "user":
+                    groq_messages[-1]["content"] += f"\n{user_text}"
+                else:
+                    groq_messages.append({"role": "user", "content": user_text})
                 
-                # Claude 4.5 Haiku で応答を生成（非同期）
+                # Llama 3.3 70b Versatile で応答を生成（非同期）
                 while True:
-                    response = await anthropic_client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                    response = await groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
                         max_tokens=500,
                         temperature=0.7,
-                        system=get_cached_system_prompt(),
-                        messages=anthropic_history,
-                        tools=TOOLS
+                        messages=groq_messages,
+                        tools=TOOLS,
+                        tool_choice="auto"
                     )
                     
-                    if response.stop_reason == "tool_use":
+                    response_message = response.choices[0].message
+                    tool_calls = response_message.tool_calls
+                    
+                    if tool_calls:
                         # アシスタントのメッセージ（ツール呼び出し）を履歴に追加
-                        anthropic_history.append({"role": "assistant", "content": response.content})
+                        # Groq/OpenAIの仕様上、オブジェクトをディクショナリにして保存する
+                        groq_messages.append({
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments
+                                    }
+                                } for tc in tool_calls
+                            ]
+                        })
                         
-                        for block in response.content:
-                            if block.type == "tool_use":
-                                if block.name == "search_web":
-                                    query = block.input["query"]
+                        for tool_call in tool_calls:
+                            if tool_call.function.name == "search_web":
+                                try:
+                                    import json
+                                    args = json.loads(tool_call.function.arguments)
+                                    query = args.get("query", "")
                                     print(f"Tool execution: search_web(query='{query}')")
                                     result_text = await perform_web_search(query)
-                                    
-                                    # ツール実行結果を履歴に追加
-                                    anthropic_history.append({
-                                        "role": "user",
-                                        "content": [
-                                            {
-                                                "type": "tool_result",
-                                                "tool_use_id": block.id,
-                                                "content": result_text
-                                            }
-                                        ]
-                                    })
+                                except Exception as e:
+                                    result_text = f"検索エラー: {e}"
+                                
+                                # ツール実行結果を履歴に追加
+                                groq_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_call.function.name,
+                                    "content": result_text
+                                })
                         continue # 再度APIを呼び出す
                     
                     # ツール使用が終わった（または使用しなかった）場合
-                    text_content = ""
-                    for block in response.content:
-                        if block.type == "text":
-                            text_content += block.text
+                    text_content = response_message.content
                             
                     if text_content:
                         await message.channel.send(text_content)
@@ -411,7 +416,7 @@ async def on_message(message):
                     break
             except Exception as e:
                 error_detail = str(e)
-                print(f"Anthropic APIエラー: {error_detail}")
+                print(f"Groq APIエラー: {error_detail}")
                 await message.channel.send(f"うぇ～ん、ちょっと頭がこんがらがっちゃったみたい……後でもう一回話しかけて～！\n(エラー詳細: `{error_detail}`)")
 
 @tree.command(name="chat_register", description="このチャンネルをユニちゃんとの自動会話（メンション不要）チャンネルに設定します。")
@@ -754,7 +759,9 @@ async def team_boost_reminder():
                         ),
                         color=0xFFB6C1
                     )
-                    await channel.send("@everyone", embed=embed)
+                    file = discord.File("figs/team_boost_day_info.png", filename="team_boost_day_info.png")
+                    embed.set_image(url="attachment://team_boost_day_info.png")
+                    await channel.send("@everyone", embed=embed, file=file)
                 except discord.errors.Forbidden:
                     print(f"チームブースト通知: チャンネルへの送信権限がありません (ID: {channel_id})")
                 except Exception as e:

@@ -3,5 +3,5 @@ beautifulsoup4
 httpx
 python-dotenv
 asyncio
-anthropic
+groq
 cloudscraper==1.2.71
