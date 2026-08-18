@@ -1,11 +1,8 @@
 texts/
 .env
-last_news_url.txt
 venv/
 __pycache__/
-channels.json
-chat_channels.json
-list_models.py
-test_env/
-test_genai/
-test_gemini.py
+# last_news_url.txt
+# channels.json
+# chat_channels.json
+# team_boost.json
