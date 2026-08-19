@@ -358,7 +358,7 @@ async def on_message(message):
                 # Llama 3.3 70b Versatile で応答を生成（非同期）
                 while True:
                     response = await groq_client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
+                        model="openai/gpt-oss-20b",
                         max_tokens=500,
                         temperature=0.7,
                         messages=groq_messages,
