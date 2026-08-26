@@ -5,3 +5,4 @@ python-dotenv
 asyncio
 groq
 cloudscraper==1.2.71
+google-cloud-vision

@@ -91,6 +91,64 @@ def get_system_prompt():
         
     return prompt
 
+def check_and_increment_vision_api_usage() -> bool:
+    usage_file = "vision_api_usage.json"
+    limit = 990
+    
+    now_month = datetime.datetime.now(JST).strftime("%Y-%m")
+    usage_data = {"month": now_month, "count": 0}
+    
+    if os.path.exists(usage_file):
+        try:
+            with open(usage_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("month") == now_month:
+                    usage_data["count"] = data.get("count", 0)
+        except Exception:
+            pass
+            
+    if usage_data["count"] >= limit:
+        return False
+        
+    usage_data["count"] += 1
+    try:
+        with open(usage_file, "w", encoding="utf-8") as f:
+            json.dump(usage_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Vision API usage save error: {e}")
+        
+    return True
+
+def detect_text_from_image_url_sync(url: str) -> str:
+    if not check_and_increment_vision_api_usage():
+        return "<VISION_API_LIMIT_REACHED>"
+        
+    try:
+        from google.cloud import vision
+        client = vision.ImageAnnotatorClient()
+        import httpx
+        with httpx.Client() as http_client:
+            image_bytes = http_client.get(url).content
+        image = vision.Image(content=image_bytes)
+        response = client.text_detection(image=image)
+        if response.error.message:
+            raise Exception(f"{response.error.message}")
+        texts = response.text_annotations
+        if texts:
+            text = texts[0].description
+            # チュウニズムのリザルトで SSS+ 等の「+」が「*」として誤認識される場合があるため補正
+            text = text.replace("SSS*", "SSS+")
+            text = text.replace("SS*", "SS+")
+            text = text.replace("S*", "S+")
+            return text
+        return ""
+    except Exception as e:
+        print(f"Vision API Error: {e}")
+        return ""
+
+async def detect_text_from_image_url(url: str) -> str:
+    return await asyncio.to_thread(detect_text_from_image_url_sync, url)
+
 def perform_web_search_sync(query: str) -> str:
     import urllib.parse
     import cloudscraper
@@ -320,15 +378,24 @@ async def on_message(message):
                 if not user_text:
                     user_text = "やっほ～！" # テキストが空（メンションのみ）の場合は挨拶として扱う
                 
+                # 添付画像がある場合、画像のURLを抽出
+                image_urls = []
+                if message.attachments:
+                    for attachment in message.attachments:
+                        if attachment.content_type and attachment.content_type.startswith('image/'):
+                            image_urls.append(attachment.url)
+                
                 # 直近のメッセージ履歴を取得して文脈を作成（最大5件）
+                # 画像がある場合は、履歴に含めないことでトークンを節約
                 history = []
-                async for msg in message.channel.history(limit=6, before=message):
-                    # 自分の発言かユーザーの発言かでロールを分ける
-                    role = "assistant" if msg.author == discord_client.user else "user"
-                    content = msg.content.replace(f'<@{discord_client.user.id}>', '').strip()
-                    # 空文字や画像のみのメッセージは除外
-                    if content:
-                        history.append({"role": role, "content": content})
+                if not image_urls:
+                    async for msg in message.channel.history(limit=6, before=message):
+                        # 自分の発言かユーザーの発言かでロールを分ける
+                        role = "assistant" if msg.author == discord_client.user else "user"
+                        content = msg.content.replace(f'<@{discord_client.user.id}>', '').strip()
+                        # 空文字や画像のみのメッセージは除外
+                        if content:
+                            history.append({"role": role, "content": content})
                 
                 # historyは新しい順で取得されるため、APIの形式（古い順）に合わせて反転する
                 history.reverse()
@@ -348,18 +415,40 @@ async def on_message(message):
                 
                 groq_messages.extend(filtered_history)
                 
+                # 添付画像からテキストを抽出してプロンプトに追加
+                instruction = ""
+                if image_urls:
+                    instruction = "\n\n(システム補足: ユーザーが画像を送信しました。これがチュウニズムのリザルト画面なら、読み取ったスコアや実績から優先順位【AJC > AJ > SSS+ > SSS】で最高の実績を思い切り褒め称えてください。高スコアでない場合は優しく労いエールを送ってください。リザルト以外の画像なら内容に合わせてノリ良く相槌を打ってください。)"
+                    extracted_texts = []
+                    limit_reached = False
+                    for url in image_urls:
+                        text = await detect_text_from_image_url(url)
+                        if text == "<VISION_API_LIMIT_REACHED>":
+                            limit_reached = True
+                            break
+                        if text:
+                            extracted_texts.append(text)
+                            
+                    if limit_reached:
+                        instruction += "\n(システム補足: 毎月の画像認識APIの利用上限（1000回）に達したため、今月はもう画像の中身を見ることができません。その旨をユーザーに可愛く伝えて謝ってください。)"
+                    elif extracted_texts:
+                        all_text = "\n---\n".join(extracted_texts)
+                        instruction += f"\n【画像から読み取ったテキスト情報】:\n{all_text}"
+                    else:
+                        instruction += "\n(画像から文字は読み取れませんでした)"
+                
                 # 最新のユーザーからのメッセージを追加
                 # 連続するuserメッセージになる場合は結合する
                 if groq_messages[-1]["role"] == "user":
-                    groq_messages[-1]["content"] += f"\n{user_text}"
+                    groq_messages[-1]["content"] += f"\n{user_text}{instruction}"
                 else:
-                    groq_messages.append({"role": "user", "content": user_text})
+                    groq_messages.append({"role": "user", "content": user_text + instruction})
                 
                 # Llama 3.3 70b Versatile で応答を生成（非同期）
                 while True:
                     response = await groq_client.chat.completions.create(
                         model="openai/gpt-oss-20b",
-                        max_tokens=500,
+                        max_tokens=4096,
                         temperature=0.7,
                         messages=groq_messages,
                         tools=TOOLS,
@@ -409,6 +498,11 @@ async def on_message(message):
                     # ツール使用が終わった（または使用しなかった）場合
                     text_content = response_message.content
                             
+                    if text_content:
+                        # 推論モデル（DeepSeek等）の思考プロセス <think>...</think> を除去
+                        import re
+                        text_content = re.sub(r'<think>.*?(?:</think>|$)', '', text_content, flags=re.DOTALL).strip()
+                        
                     if text_content:
                         await message.channel.send(text_content)
                     else:

@@ -2,6 +2,7 @@ texts/
 .env
 venv/
 __pycache__/
+chuni-news-bot-vm-ca07db265a0d.json
 # last_news_url.txt
 # channels.json
 # chat_channels.json
