@@ -21,6 +21,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+SUPPORT_CHANNEL_ID = os.getenv('SUPPORT_CHANNEL_ID')
 
 # Llama (Groq) の設定
 SYSTEM_INSTRUCTION = """
@@ -45,7 +46,7 @@ SYSTEM_INSTRUCTION = """
 - 「ねね、そっちの世界でも大きなアプデがあったんだって？ふふーん、私もなーんか調子いいんだよね～！！」
 - 「さ、プレイヤーさん！準備いい？いまならどんなVERSEにだって繋げちゃうよ～！！」
 - 「えへへ、うっれっし！！よーし、楽曲いっぱい生成しなきゃね！ナビちゃん、忙しくなるよ～！」
-- 「あ、プレイヤーさんもだよ？一緒に解析つきあってもらうんだから覚悟、しといてね！」
+- 「あ、プレイヤーさんもだよ？一緒に解析つきあってもらうんだから覚悟しといてね！」
 - 「大丈夫大丈夫！いままでだってなんとかなったんだし、ね！よーし！やるぞー！！」
 
 # 制限事項・ルール
@@ -169,6 +170,67 @@ def perform_web_search_sync(query: str) -> str:
 async def perform_web_search(query: str) -> str:
     return await asyncio.to_thread(perform_web_search_sync, query)
 
+def search_song_constant_sync(query: str) -> str:
+    import os
+    import unicodedata
+    import difflib
+    import re
+    try:
+        file_path = "prompt_cache/chunithm_const_data.txt"
+        if not os.path.exists(file_path):
+            return "ローカルの定数データファイルが見つかりません。"
+            
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        # 検索クエリを正規化（全角半角、大文字小文字の統一）
+        normalized_query = unicodedata.normalize("NFKC", query).lower()
+            
+        exact_matches = []
+        fuzzy_matches = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # 【曲名】の形式を前提に曲名を抽出
+            match = re.search(r'【(.*?)】', line)
+            if match:
+                title = match.group(1)
+            else:
+                title = line
+                
+            normalized_title = unicodedata.normalize("NFKC", title).lower()
+            
+            if normalized_query in normalized_title:
+                # 部分一致
+                exact_matches.append(line)
+            else:
+                # あいまい検索（類似度スコアを計算）
+                ratio = difflib.SequenceMatcher(None, normalized_query, normalized_title).ratio()
+                # 類似度が80%以上なら候補に入れる
+                if ratio >= 0.8:
+                    fuzzy_matches.append((ratio, line))
+                    
+        # 部分一致があれば優先、なければあいまい検索のスコアが高い順に採用
+        if exact_matches:
+            results = exact_matches
+        elif fuzzy_matches:
+            fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
+            results = [match[1] for match in fuzzy_matches]
+        else:
+            results = []
+                
+        if results:
+            return "楽曲定数検索結果:\n" + "\n".join(results[:5])
+        return f"「{query}」の定数データは見つかりませんでした。"
+    except Exception as e:
+        return f"楽曲定数取得エラー: {e}"
+
+async def search_song_constant(query: str) -> str:
+    return await asyncio.to_thread(search_song_constant_sync, query)
+
 # Groq用のツール定義
 TOOLS = [
     {
@@ -182,6 +244,23 @@ TOOLS = [
                     "query": {
                         "type": "string",
                         "description": "検索するキーワード（例：'CHUNITHM 今月の日替わりボーナス', 'チュウニズム 最新イベント'）"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_song_constant",
+            "description": "チュウニズムの楽曲定数（譜面定数）を検索します。ユーザーが特定の楽曲の定数について聞いた時に使用してください。\n【重要】ユーザーが「6兆年」や「エンドマーク」などの略称や俗称で質問してきた場合、ツールに渡す query は必ずあなたが推論した『正式名称（例：六兆年と一夜物語、エンドマークに希望と涙を添えて）』に変換して入力してください。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "検索する楽曲の正式名称（ユーザーの入力をそのまま渡さず、必ず正式名称を推論して入力すること）"
                     }
                 },
                 "required": ["query"]
@@ -344,6 +423,57 @@ async def on_ready():
     end_of_month_reminder.start()
     team_boost_reminder.start()
     team_boost_setting_reminder.start()
+    
+    await broadcast_changelog_if_needed()
+
+async def broadcast_changelog_if_needed():
+    """Bot起動時にCHANGELOG.mdを確認し、新しい更新内容があればサポートチャンネルに通知する"""
+    if not SUPPORT_CHANNEL_ID:
+        print("Discord: SUPPORT_CHANNEL_ID が設定されていないため、変更履歴の自動送信をスキップします。")
+        return
+        
+    try:
+        channel = await discord_client.fetch_channel(int(SUPPORT_CHANNEL_ID))
+    except Exception as e:
+        print(f"Discord: チャンネルの取得に失敗しました ({SUPPORT_CHANNEL_ID}): {e}")
+        return
+        
+    if not os.path.exists("CHANGELOG.md"):
+        print("Discord: CHANGELOG.md が見つからないため送信をスキップします。")
+        return
+        
+    with open("CHANGELOG.md", "r", encoding="utf-8") as f:
+        content = f.read()
+        
+    # 最新のリリースセクション（最初の ## から次の ## または末尾まで）を抽出
+    match = re.search(r'^(##\s+.*?)(?=\n##\s|\Z)', content, re.MULTILINE | re.DOTALL)
+    if not match:
+        return
+        
+    latest_log = match.group(1).strip()
+    version_title = latest_log.split("\n")[0].strip()
+    
+    last_sent_file = "last_changelog.txt"
+    if os.path.exists(last_sent_file):
+        with open(last_sent_file, "r", encoding="utf-8") as f:
+            last_sent = f.read().strip()
+        if last_sent == version_title:
+            return  # 既に送信済み
+            
+    # 新しい内容があれば送信
+    message = (
+        "やっほ～！プレイヤーさん！Botのアップデートが完了したよ！✨\n"
+        "今回の更新内容はこんな感じだよ～！\n\n"
+        f"```markdown\n{latest_log}\n```"
+    )
+    
+    try:
+        await channel.send(message)
+        with open(last_sent_file, "w", encoding="utf-8") as f:
+            f.write(version_title)
+        print(f"Discord: 変更履歴 ({version_title}) をサポートチャンネルに送信しました。")
+    except Exception as e:
+        print(f"Discord: 変更履歴の送信に失敗しました: {e}")
 
 @discord_client.event
 async def on_message(message):
@@ -395,6 +525,8 @@ async def on_message(message):
                         content = msg.content.replace(f'<@{discord_client.user.id}>', '').strip()
                         # 空文字や画像のみのメッセージは除外
                         if content:
+                            if len(content) > 100:
+                                content = content[:100] + "..."
                             history.append({"role": role, "content": content})
                 
                 # historyは新しい順で取得されるため、APIの形式（古い順）に合わせて反転する
@@ -483,6 +615,23 @@ async def on_message(message):
                                     query = args.get("query", "")
                                     print(f"Tool execution: search_web(query='{query}')")
                                     result_text = await perform_web_search(query)
+                                except Exception as e:
+                                    result_text = f"検索エラー: {e}"
+                                
+                                # ツール実行結果を履歴に追加
+                                groq_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_call.function.name,
+                                    "content": result_text
+                                })
+                            elif tool_call.function.name == "search_song_constant":
+                                try:
+                                    import json
+                                    args = json.loads(tool_call.function.arguments)
+                                    query = args.get("query", "")
+                                    print(f"Tool execution: search_song_constant(query='{query}')")
+                                    result_text = await search_song_constant(query)
                                 except Exception as e:
                                     result_text = f"検索エラー: {e}"
                                 
