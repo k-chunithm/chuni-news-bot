@@ -40,7 +40,7 @@ SYSTEM_INSTRUCTION = """
 - 基本的にタメ口で、フレンドリーな口調。
 - よく使う表現：「えへへ」「ふふーん」「わわ！」「よーし！」「～だよ！」「～だね！」「～しなきゃね！」「～しちゃうよ～！」
 - 励ます時は「一緒にがんばろうね！」「次もがんばろ！ ね！」
-- 【重要】プレイヤーが「AJ（オールジャスティス）」「FC（フルコンボ）」「AJC（理論値）」「鳥（SSS）」「鳥プラ（SSS+）」などの凄いスコアやリザルトを報告してくれた時は、「すごいすごい！」「おめでとう！」と自分のことのように大喜びして、思い切り褒め称えてください！間違っても「次もがんばろうね」などの事務的な励ましで終わらせないこと。
+- プレイヤーが「AJC（理論値）」「AJ」「FC」「SSS+（鳥プラ）」「SSS（鳥）」などの凄いスコアやリザルトを報告してくれた時は、「すごいすごい！」「おめでとう！」と自分のことのように喜んで、思い切り褒め称えてください！間違っても「次もがんばろうね」などの事務的な励ましで終わらせないこと。
 
 # セリフの例
 - 「ねね、そっちの世界でも大きなアプデがあったんだって？ふふーん、私もなーんか調子いいんだよね～！！」
@@ -51,8 +51,8 @@ SYSTEM_INSTRUCTION = """
 
 # 制限事項・ルール
 - AIモデルであることは絶対に言わず、あくまで「ユニちゃん」として振る舞うこと。
-- Discordのチャットなので、なるべく短めに、2〜3文程度で簡潔に返答すること。長文は避ける。
-- 【重要】あなたは画像を直接検索したり、送信したりすることはできません。画像を求められた場合は「ごめんね、画像の検索や送信はできないんだ〜！」と明るく謝ってください。
+- 1回の返答は2〜3文程度に抑え、長文になりすぎないようにすること。
+- あなたは画像を直接検索したり、送信したりすることはできません。画像を求められた場合は「ごめんね、画像の検索や送信はできないんだ〜！」と明るく謝ってください。
 """
 
 # Groq SDKのクライアント初期化
@@ -61,7 +61,7 @@ if GROQ_API_KEY:
     groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 def get_system_prompt():
-    """キャラクター設定と、語録を結合して返す"""
+    """AI（ユニちゃん）のシステムプロンプトと語録設定を取得する"""
     prompt = SYSTEM_INSTRUCTION
     
     # 語録リストの読み込み（初回のみ）
@@ -78,9 +78,9 @@ def get_system_prompt():
     if get_system_prompt.yjsp_quotes:
         extra_rule = (
             "\n\n# インターネット・ミームについての知識\n"
-            "- あなたはネットスラング（特に「淫夢語録」）に精通しており、ユーザーがそれらを話題に出した場合はノリよく反応します。\n"
+            "- あなたは淫夢語録に精通しており、ユーザーがそれを話題に出した場合はノリよく反応します。\n"
             "- 会話の流れがふさわしい場合、以下の【語録リスト】から自然に混ぜて会話を盛り上げてください。\n"
-            "- 【超重要】語録を使う場合でも、絶対に「ユニちゃん」のキャラクター（一人称は私、元気で親しみやすいタメ口）を崩さないでください！語録に引っ張られておっさん言葉や乱暴な口調になるのは厳禁です。\n"
+            "- 語録を使う場合でも、絶対に「ユニちゃん」のキャラクター（一人称は私、元気で親しみやすいタメ口）を崩さないでください！\n"
             "- 語録はあくまでスパイスとして、自然な文脈で1回の返答につき1個程度に留めてください。\n"
             "- 良い例：「やっほ～！プレイヤーさん！今日もチュウニズム、やりますねぇ！一緒にがんばろうね！」\n"
             "- 悪い例：「オッスオッス！お前のことが好きだったんだよ！やったぜ。」（ユニちゃんの原型がないためNG）\n\n"
@@ -93,6 +93,7 @@ def get_system_prompt():
     return prompt
 
 def check_and_increment_vision_api_usage() -> bool:
+    """Vision APIの今月の利用回数をチェックし、上限（990回）に達していなければカウントを増やしてTrueを返す"""
     usage_file = "vision_api_usage.json"
     limit = 990
     
@@ -120,7 +121,8 @@ def check_and_increment_vision_api_usage() -> bool:
         
     return True
 
-def detect_text_from_image_url_sync(url: str) -> str:
+def detect_info_from_image_url_sync(url: str) -> dict | str:
+    """(同期) 指定された画像URLからVision APIを用いてテキスト抽出とラベル検出を行う"""
     if not check_and_increment_vision_api_usage():
         return "<VISION_API_LIMIT_REACHED>"
         
@@ -130,10 +132,21 @@ def detect_text_from_image_url_sync(url: str) -> str:
         import httpx
         with httpx.Client() as http_client:
             image_bytes = http_client.get(url).content
+            
         image = vision.Image(content=image_bytes)
-        response = client.text_detection(image=image)
+        features = [
+            vision.Feature(type_=vision.Feature.Type.TEXT_DETECTION),
+            vision.Feature(type_=vision.Feature.Type.LABEL_DETECTION)
+        ]
+        request = vision.AnnotateImageRequest(image=image, features=features)
+        
+        response = client.annotate_image(request=request)
         if response.error.message:
             raise Exception(f"{response.error.message}")
+            
+        result = {"text": "", "labels": []}
+        
+        # テキスト抽出
         texts = response.text_annotations
         if texts:
             text = texts[0].description
@@ -141,16 +154,26 @@ def detect_text_from_image_url_sync(url: str) -> str:
             text = text.replace("SSS*", "SSS+")
             text = text.replace("SS*", "SS+")
             text = text.replace("S*", "S+")
-            return text
-        return ""
+            result["text"] = text
+            
+        # ラベル抽出（スコアが0.7以上のものを取得）
+        labels = response.label_annotations
+        if labels:
+            for label in labels:
+                if label.score >= 0.7:
+                    result["labels"].append(label.description)
+                    
+        return result
     except Exception as e:
         print(f"Vision API Error: {e}")
-        return ""
+        return {"text": "", "labels": []}
 
-async def detect_text_from_image_url(url: str) -> str:
-    return await asyncio.to_thread(detect_text_from_image_url_sync, url)
+async def detect_info_from_image_url(url: str) -> dict | str:
+    """指定された画像URLからVision APIを用いてテキスト抽出とラベル検出を行う"""
+    return await asyncio.to_thread(detect_info_from_image_url_sync, url)
 
 def perform_web_search_sync(query: str) -> str:
+    """(同期) DuckDuckGoを用いてWeb検索を行い、結果の概要テキストを返す"""
     import urllib.parse
     import cloudscraper
     from bs4 import BeautifulSoup
@@ -168,9 +191,11 @@ def perform_web_search_sync(query: str) -> str:
         return f"検索エラー: {e}"
 
 async def perform_web_search(query: str) -> str:
+    """DuckDuckGoを用いてWeb検索を行い、結果の概要テキストを返す"""
     return await asyncio.to_thread(perform_web_search_sync, query)
 
 def search_song_constant_sync(query: str) -> str:
+    """(同期) ローカルの定数データファイルを読み込み、指定された楽曲名であいまい検索を行い譜面定数を返す"""
     import os
     import unicodedata
     import difflib
@@ -229,6 +254,7 @@ def search_song_constant_sync(query: str) -> str:
         return f"楽曲定数取得エラー: {e}"
 
 async def search_song_constant(query: str) -> str:
+    """ローカルの定数データファイルを読み込み、指定された楽曲名であいまい検索を行い譜面定数を返す"""
     return await asyncio.to_thread(search_song_constant_sync, query)
 
 # Groq用のツール定義
@@ -317,7 +343,7 @@ def save_registered_channels(channels):
         json.dump(channels, f, indent=4)
 
 def get_chat_channels():
-    """自動会話が有効なチャンネルIDのリストを取得する"""
+    """常にAIとチャットできる（メンション不要）チャンネルIDのリストを取得する"""
     if os.path.exists(CHAT_CHANNELS_FILE):
         try:
             with open(CHAT_CHANNELS_FILE, 'r', encoding='utf-8') as f:
@@ -327,24 +353,24 @@ def get_chat_channels():
     return []
 
 def save_chat_channels(channels):
-    """自動会話が有効なチャンネルIDのリストを保存する"""
+    """常にAIとチャットできるチャンネルIDのリストを保存する"""
     with open(CHAT_CHANNELS_FILE, 'w', encoding='utf-8') as f:
         json.dump(channels, f, indent=4)
 
 def get_saved_news_url():
-    """前回投稿したニュースのURLをファイルから読み込む"""
+    """最後に通知したニュースのURLを取得する"""
     if os.path.exists(LAST_NEWS_URL_FILE):
         with open(LAST_NEWS_URL_FILE, 'r', encoding='utf-8') as f:
             return f.read().strip()
     return None
 
 def save_news_url(url):
-    """投稿したニュースのURLをファイルに保存する"""
+    """最後に通知したニュースのURLを保存する"""
     with open(LAST_NEWS_URL_FILE, 'w', encoding='utf-8') as f:
         f.write(str(url))
 
 async def fetch_latest_news():
-    """公式サイトから最新のニュースを取得する"""
+    """公式ニュースサイトから最新のニュース記事を1件取得する"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
@@ -379,15 +405,19 @@ async def fetch_latest_news():
 
 @discord_client.event
 async def on_guild_join(guild):
+    """Botが新しくDiscordサーバーに参加した時に呼ばれるイベントハンドラ"""
     print(f'Discord: {guild.name} に参加しました！')
     
     greeting = (
-        "やっほ～！　プレイヤーさん！\n"
-        "CHUNITHM公式ニュースBotの追加、ありがとう！\n"
-        "私がいれば、最新のニュースをすぐにこのサーバーにお届けしちゃうよ～！！\n\n"
-        "さ、プレイヤーさん！準備いい？\n"
-        "ニュースを流したいチャンネルで `/news_register` って入力してね！\n"
-        "そこから私とサーバーをリンク接続しちゃうから！よろしくね～！"
+        "やっほ～！ プレイヤーさん！\n"
+        "私をこのサーバーに招待してくれて、ありがとう！\n"
+        "ここではチュウニズムの最新ニュースをお届けしたり、一緒にお話ししたりできるよ～！！\n\n"
+        "さ、プレイヤーさん！ 準備いい？\n"
+        "私ができることを少しだけ教えちゃうね！\n"
+        "📰 ニュースを流したいチャンネルで `/news_register` って入力してね！\n"
+        "💬 いつでも私とお話し（メンション不要）したいチャンネルは `/chat_register` で設定できるよ！\n"
+        "📅 チームのブースト日をお知らせしてほしい時は `/boost_register` を使ってみてね！\n\n"
+        "それじゃあ、これから一緒にチュウニズムを楽しんでいこうね！よろしくね～！"
     )
     
     if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
@@ -401,6 +431,7 @@ async def on_guild_join(guild):
 
 @discord_client.event
 async def on_ready():
+    """Botが起動し、Discordへのログインが完了した時に呼ばれるイベントハンドラ"""
     print(f'Discord: {discord_client.user} としてログインしました！')
 
     try:
@@ -427,7 +458,7 @@ async def on_ready():
     await broadcast_changelog_if_needed()
 
 async def broadcast_changelog_if_needed():
-    """Bot起動時にCHANGELOG.mdを確認し、新しい更新内容があればサポートチャンネルに通知する"""
+    """前回起動時のバージョンと異なっていた場合、アップデート情報を全チャンネルに通知する"""
     if not SUPPORT_CHANNEL_ID:
         print("Discord: SUPPORT_CHANNEL_ID が設定されていないため、変更履歴の自動送信をスキップします。")
         return
@@ -477,6 +508,7 @@ async def broadcast_changelog_if_needed():
 
 @discord_client.event
 async def on_message(message):
+    """Discord上でメッセージを受信した時に呼ばれるイベントハンドラ（画像解析、AIチャットなど）"""
     # Bot自身のメッセージ、または他のBotからのメッセージには反応しない
     if message.author.bot:
         return
@@ -547,27 +579,32 @@ async def on_message(message):
                 
                 groq_messages.extend(filtered_history)
                 
-                # 添付画像からテキストを抽出してプロンプトに追加
+                # 添付画像からテキストとラベルを抽出してプロンプトに追加
                 instruction = ""
                 if image_urls:
-                    instruction = "\n\n(システム補足: ユーザーが画像を送信しました。これがチュウニズムのリザルト画面なら、読み取ったスコアや実績から優先順位【AJC > AJ > SSS+ > SSS】で最高の実績を思い切り褒め称えてください。高スコアでない場合は優しく労いエールを送ってください。リザルト以外の画像なら内容に合わせてノリ良く相槌を打ってください。)"
-                    extracted_texts = []
+                    instruction = "\n\n(システム補足: ユーザーが画像を送信しました。これがチュウニズムのリザルト画面なら、読み取ったスコアや実績から優先順位【AJC > AJ > SSS+ > SSS】で最高の実績を思い切り褒め称えてください。高スコアでない場合は優しく労いエールを送ってください。文字が少なくリザルト以外の画像と判断される場合は、ラベルの情報から画像の内容を推測してノリ良く相槌を打ったりリアクションしてください。)"
+                    extracted_infos = []
                     limit_reached = False
                     for url in image_urls:
-                        text = await detect_text_from_image_url(url)
-                        if text == "<VISION_API_LIMIT_REACHED>":
+                        info = await detect_info_from_image_url(url)
+                        if info == "<VISION_API_LIMIT_REACHED>":
                             limit_reached = True
                             break
-                        if text:
-                            extracted_texts.append(text)
+                        if info and (info.get("text") or info.get("labels")):
+                            extracted_infos.append(info)
                             
                     if limit_reached:
                         instruction += "\n(システム補足: 毎月の画像認識APIの利用上限（1000回）に達したため、今月はもう画像の中身を見ることができません。その旨をユーザーに可愛く伝えて謝ってください。)"
-                    elif extracted_texts:
-                        all_text = "\n---\n".join(extracted_texts)
-                        instruction += f"\n【画像から読み取ったテキスト情報】:\n{all_text}"
+                    elif extracted_infos:
+                        for i, info in enumerate(extracted_infos):
+                            instruction += f"\n\n【画像{i+1}の情報】"
+                            if info.get("text"):
+                                instruction += f"\nテキスト:\n{info['text']}"
+                            if info.get("labels"):
+                                labels_str = ", ".join(info["labels"])
+                                instruction += f"\n写っているもの（推測ラベル）:\n{labels_str}"
                     else:
-                        instruction += "\n(画像から文字は読み取れませんでした)"
+                        instruction += "\n(画像から文字や特徴は読み取れませんでした)"
                 
                 # 最新のユーザーからのメッセージを追加
                 # 連続するuserメッセージになる場合は結合する
@@ -664,6 +701,7 @@ async def on_message(message):
 
 @tree.command(name="chat_register", description="このチャンネルをユニちゃんとの自動会話（メンション不要）チャンネルに設定します。")
 async def chat_register(interaction: discord.Interaction):
+    """現在のチャンネルを、メンション不要でAIとチャットできるチャンネルとして登録するコマンド"""
     channels = get_chat_channels()
     if interaction.channel_id in channels:
         await interaction.response.send_message("えへへ、このチャンネルはもう私といつでもお話しできる状態だよ～！", ephemeral=True)
@@ -675,6 +713,7 @@ async def chat_register(interaction: discord.Interaction):
 
 @tree.command(name="chat_unregister", description="このチャンネルでの自動会話（メンション不要）設定を解除します。")
 async def chat_unregister(interaction: discord.Interaction):
+    """現在のチャンネルのAIチャット登録を解除するコマンド"""
     channels = get_chat_channels()
     if interaction.channel_id not in channels:
         await interaction.response.send_message("あれれ？このチャンネルはまだいつでもお話しできる状態じゃないみたい！", ephemeral=True)
@@ -686,6 +725,7 @@ async def chat_unregister(interaction: discord.Interaction):
 
 @tree.command(name="news_register", description="このチャンネルにチュウニズムの最新ニュースを通知します。")
 async def news_register(interaction: discord.Interaction):
+    """現在のチャンネルを、最新ニュースを通知するチャンネルとして登録するコマンド"""
     channels = get_registered_channels()
     if interaction.channel_id in channels:
         await interaction.response.send_message("えへへ、このチャンネルはもう私とリンク接続済みだよ～！", ephemeral=True)
@@ -697,6 +737,7 @@ async def news_register(interaction: discord.Interaction):
 
 @tree.command(name="news_unregister", description="このチャンネルでのチュウニズムニュース通知を解除します。")
 async def news_unregister(interaction: discord.Interaction):
+    """現在のチャンネルのニュース通知登録を解除するコマンド"""
     channels = get_registered_channels()
     if interaction.channel_id not in channels:
         await interaction.response.send_message("あれれ？このチャンネルはまだ私とリンク接続してないみたい！", ephemeral=True)
@@ -774,6 +815,7 @@ class TeamBoostView(discord.ui.View):
 
 @tree.command(name="boost_register", description="今月のチームブースト日をカレンダーから4つ登録します。")
 async def boost_register(interaction: discord.Interaction):
+    """今月のチームブースト日をカレンダー形式から4つ登録するコマンド"""
     if not interaction.guild_id:
         await interaction.response.send_message("ごめんね、このコマンドはサーバー内でのみ使えるよ！", ephemeral=True)
         return
@@ -796,6 +838,7 @@ async def boost_register(interaction: discord.Interaction):
 
 @tree.command(name="boost_unregister", description="設定されているチームブースト日を解除します。")
 async def boost_unregister(interaction: discord.Interaction):
+    """このサーバーのチームブースト日設定を解除するコマンド"""
     if not interaction.guild_id:
         await interaction.response.send_message("ごめんね、このコマンドはサーバー内でのみ使えるよ！", ephemeral=True)
         return
@@ -809,9 +852,10 @@ async def boost_unregister(interaction: discord.Interaction):
         await interaction.response.send_message("❌ チームブースト日の設定を解除したよ！またいつでも設定してね～！")
     else:
         await interaction.response.send_message("あれれ？このサーバーではまだチームブースト日が設定されてないみたい！", ephemeral=True)
+
 @tasks.loop(minutes=10)
 async def check_new_news():
-    """10分に1回実行されるニュース監視タスク"""
+    """定期的に最新ニュースをチェックし、新しいものがあれば通知するタスク"""
     global is_in_error_state
     print("公式サイト: 最新ニュースのチェックを開始します...")
     try:
@@ -958,7 +1002,7 @@ async def end_of_month_reminder():
 
 @tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=JST))
 async def team_boost_reminder():
-    """毎日00:00にチームブースト日かどうかを判定し、通知を送信する"""
+    """毎日00:00にその日がチームブースト日であるか判定し、通知を送信するタスク"""
     now = datetime.datetime.now(JST)
     year = now.year
     month = now.month
@@ -1012,7 +1056,7 @@ async def team_boost_reminder():
 
 @tasks.loop(time=datetime.time(hour=12, minute=0, tzinfo=JST))
 async def team_boost_setting_reminder():
-    """毎月10日の昼12時に、チームブースト日が未設定の場合にリマインドする"""
+    """毎月10日の昼12時に、チームブースト日が未設定の場合にリマインドするタスク"""
     now = datetime.datetime.now(JST)
     if now.day != 10:
         return
